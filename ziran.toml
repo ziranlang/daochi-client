@@ -1,0 +1,21 @@
+[package]
+name = "DaochiClient"
+module_roots = ["."]
+
+[toolchain]
+git = "https://github.com/ziranlang/ziran.git"
+ref = "master"
+
+[exports]
+account = "account.zi"
+async_account = "async_account.zi"
+async_client = "async_client.zi"
+async_sync = "async_sync.zi"
+auth = "auth.zi"
+client = "client.zi"
+events = "events.zi"
+social = "social.zi"
+sync = "sync.zi"
+transaction = "transaction.zi"
+url = "url.zi"
+wire = "wire.zi"
