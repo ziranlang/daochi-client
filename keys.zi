@@ -1,0 +1,597 @@
+#import "crypto"
+#import "byte_text_linux"
+#import "oqs"
+
+// Daochi account keys: an ML-DSA-44 key pair whose public id is the
+// SHA-256 of the public key. This creates and signs with keys and reads and
+// writes the key file formats, plain (account-key-v1) and passphrase
+// encrypted (ksync-account-key-v2). The app stores the keys; this library
+// never persists or logs them.
+
+// An account's wire sizes, as hex text with room for a NUL.
+ACCOUNT_PUBLIC_ID_HEX_SIZE :: 65
+ACCOUNT_PUBLIC_KEY_HEX_SIZE :: 2625
+ACCOUNT_PRIVATE_KEY_HEX_SIZE :: 5121
+ACCOUNT_SIGNATURE_HEX_SIZE :: 4841
+ACCOUNT_EXPORT_TEXT_SIZE :: 8200
+ACCOUNT_EXPORT_ENCRYPTED_TEXT_SIZE :: 17664
+ACCOUNT_PASSPHRASE_ITERATIONS :: 600000
+
+AccountKeys :: struct {
+    public_id: [ACCOUNT_PUBLIC_ID_HEX_SIZE] u8
+    public_key_hex: [ACCOUNT_PUBLIC_KEY_HEX_SIZE] u8
+    private_key_hex: [ACCOUNT_PRIVATE_KEY_HEX_SIZE] u8
+}
+
+
+#program_export
+SecureRandom :: (output: *u8, length: s64) -> s32 {
+    if length < 0 || (output == null && length > 0) {
+        return 0
+    }
+    if size_of(usize) < 8 && length > 4294967295 {
+        return 0
+    }
+    if length > 0 {
+        RandomBytes(BytesFromPointer(output, cast(u64)length))
+    }
+    return 1
+}
+
+#program_export
+SecureWipe :: (output: *u8, length: s64) {
+    if output == null || length <= 0 { return }
+    Cleanse(BytesFromPointer(output, cast(u64)length))
+}
+
+
+// ML-DSA-44's fixed sizes are part of the account format.
+AccountPublicKeyBytes :: 1312
+AccountPrivateKeyBytes :: 2560
+
+AccountValuesEqual :: (left: *AccountKeys, right: *AccountKeys) -> bool {
+    if left == null || right == null {
+        return false
+    }
+    difference: u8 = 0
+    index: s32 = 0
+    while index < ACCOUNT_PUBLIC_ID_HEX_SIZE {
+        difference |= left.public_id[index] ^ right.public_id[index]
+        index += 1
+    }
+    index = 0
+    while index < ACCOUNT_PUBLIC_KEY_HEX_SIZE {
+        difference |= left.public_key_hex[index] ^ right.public_key_hex[index]
+        index += 1
+    }
+    index = 0
+    while index < ACCOUNT_PRIVATE_KEY_HEX_SIZE {
+        difference |= left.private_key_hex[index] ^ right.private_key_hex[index]
+        index += 1
+    }
+    return difference == 0
+}
+
+#program_export
+CreateAccountKeys :: (account: *AccountKeys) -> s32 {
+    if account == null {
+        return 0
+    }
+    public_key: [AccountPublicKeyBytes]u8
+    private_key: [AccountPrivateKeyBytes]u8
+    generated: AccountKeys = .{}
+
+    if !MlDsa44KeyPair(public_key[:], private_key[:]) {
+        return 0
+    }
+    Sha256Hex(*public_key[0], AccountPublicKeyBytes,
+        *generated.public_id[0])
+    if BytesToHex(*public_key[0], AccountPublicKeyBytes,
+        *generated.public_key_hex[0], ACCOUNT_PUBLIC_KEY_HEX_SIZE) == 0 {
+        return 0
+    }
+    if BytesToHex(*private_key[0], AccountPrivateKeyBytes,
+        *generated.private_key_hex[0], ACCOUNT_PRIVATE_KEY_HEX_SIZE) == 0 {
+        return 0
+    }
+    account.* = generated
+    return 1
+}
+
+
+AccountSignatureBytes :: 2420
+AccountSigningKeyBytes :: 2560
+
+AccountBufferText :: (data: *u8, capacity: s64) -> string {
+    if data == null || capacity <= 0 { return "" }
+    length: s64 = 0
+    while length < capacity && data[length] != cast(u8)0 {
+        length += 1
+    }
+    if length == capacity { return "" }
+    return TextFromBytes(BytesFromPointer(data, cast(u64)length))
+}
+
+CopySigningText :: (value: string, output: []u8) -> bool {
+    if value.count >= output.count { return false }
+    index: s64 = 0
+    while index < cast(s64)value.count {
+        byte := value[index]
+        if byte == cast(u8)0 { return false }
+        output[index] = byte
+        index += 1
+    }
+    output[index] = cast(u8)0
+    return true
+}
+
+#program_export
+SignAccountKeysHex :: (account: *AccountKeys, message: *u8,
+    message_length: s64, output: *u8, output_size: s64) -> s32 {
+    if output == null || output_size <= 0 {
+        return 0
+    }
+    output[0] = 0
+    if output_size < ACCOUNT_SIGNATURE_HEX_SIZE { return 0 }
+    if account == null || account.public_id[0] == 0 ||
+    account.public_key_hex[0] == 0 || account.private_key_hex[0] == 0 ||
+    message_length < 0 || (message == null && message_length > 0) {
+        return 0
+    }
+    private_key: [AccountSigningKeyBytes]u8
+    private_text := AccountBufferText(*account.private_key_hex[0],
+        ACCOUNT_PRIVATE_KEY_HEX_SIZE)
+    if HexToBytes(private_text, *private_key[0], AccountSigningKeyBytes) == 0 {
+        return 0
+    }
+    signature: [AccountSignatureBytes]u8
+    if MlDsa44Sign(signature[:], BytesFromPointer(message,
+        cast(u64)message_length), private_key[:]) != AccountSignatureBytes {
+        return 0
+    }
+    return BytesToHex(*signature[0], AccountSignatureBytes,
+        output, output_size)
+}
+
+// Signs the exact login, registration, or transaction message bytes.
+#scope_export
+#program_export
+SignAccountMessage :: (context: *void, message: string,
+    output: []u8) -> bool {
+    if context == null || message.count == 0 ||
+    message.count > 9223372036854775807 ||
+    output.count < ACCOUNT_SIGNATURE_HEX_SIZE { return false }
+    descriptor: *TextDescriptor = cast(*TextDescriptor)(*message)
+    return SignAccountKeysHex(cast(*AccountKeys)context, descriptor.data,
+        cast(s64)message.count, *output[0], cast(s64)output.count) != 0
+}
+
+
+AccountTextAppend :: (output: *u8, capacity: s64,
+    cursor: *s64, value: string) -> bool {
+    if output == null || cursor == null || capacity <= 0 ||
+        cursor.* < 0 || cursor.* >= capacity ||
+        cast(s64)value.count > capacity - cursor.* - 1 {
+        return false
+    }
+    index: s64 = 0
+    while index < cast(s64)value.count {
+        byte := value[index]
+        if byte == 0 {
+            return false
+        }
+        output[cursor.* + index] = byte
+        index += 1
+    }
+    cursor.* += cast(s64)value.count
+    output[cursor.*] = 0
+    return true
+}
+
+AccountTextAppendField :: (output: *u8, capacity: s64,
+    cursor: *s64, field: *u8, field_capacity: s64) -> bool {
+    if output == null || cursor == null || field == null ||
+        field_capacity <= 0 || capacity <= 0 ||
+        cursor.* < 0 || cursor.* >= capacity {
+        return false
+    }
+    length: s64 = 0
+    while length < field_capacity && field[length] != 0 {
+        length += 1
+    }
+    if length == 0 || length == field_capacity ||
+        length > capacity - cursor.* - 1 {
+        return false
+    }
+    index: s64 = 0
+    while index < length {
+        output[cursor.* + index] = field[index]
+        index += 1
+    }
+    cursor.* += length
+    output[cursor.*] = 0
+    return true
+}
+
+#program_export
+AccountKeysText :: (account: *AccountKeys,
+    output: *u8, output_size: s64) -> s32 {
+    if output == null || output_size <= 0 {
+        return 0
+    }
+    output[0] = 0
+    if account == null || account.public_id[0] == 0 ||
+        account.public_key_hex[0] == 0 || account.private_key_hex[0] == 0 {
+        return 0
+    }
+    cursor: s64 = 0
+    if !AccountTextAppend(output, output_size, *cursor,
+        "account-key-v1\nalgorithm=ML-DSA-44\npublic_id=") ||
+        !AccountTextAppendField(output, output_size, *cursor,
+            *account.public_id[0], ACCOUNT_PUBLIC_ID_HEX_SIZE) ||
+        !AccountTextAppend(output, output_size, *cursor, "\npublic_key=") ||
+        !AccountTextAppendField(output, output_size, *cursor,
+            *account.public_key_hex[0], ACCOUNT_PUBLIC_KEY_HEX_SIZE) ||
+        !AccountTextAppend(output, output_size, *cursor, "\nprivate_key=") ||
+        !AccountTextAppendField(output, output_size, *cursor,
+            *account.private_key_hex[0], ACCOUNT_PRIVATE_KEY_HEX_SIZE) ||
+        !AccountTextAppend(output, output_size, *cursor, "\n") {
+        output[0] = 0
+        return 0
+    }
+    return 1
+}
+
+
+AccountTrimValue :: (value: string) -> string {
+    start: s64 = 0
+    finish: s64 = value.count
+    while start < finish && (value[start] == cast(u8)32 || value[start] == cast(u8)9) {
+        start += 1
+    }
+    while finish > start && (value[finish - 1] == cast(u8)32 ||
+        value[finish - 1] == cast(u8)9 || value[finish - 1] == cast(u8)13) {
+        finish -= 1
+    }
+    return value[start:finish]
+}
+
+AccountStartsWith :: (value: string, prefix: string) -> bool {
+    if value.count < prefix.count { return false }
+    index: s64 = 0
+    while index < prefix.count {
+        if value[index] != prefix[index] { return false }
+        index += 1
+    }
+    return true
+}
+
+AccountField :: (line: string, prefix: string, output: []u8) -> bool {
+    if !AccountStartsWith(line, prefix) { return false }
+    return AccountCopyText(AccountTrimValue(line[prefix.count:line.count]), output)
+}
+
+AccountJsonWhitespace :: (byte: u8) -> bool {
+    return byte == cast(u8)32 || byte == cast(u8)9 ||
+        byte == cast(u8)10 || byte == cast(u8)13
+}
+
+AccountJsonExportedKey :: (json: string, output: []u8) -> bool {
+    field: string = "\"exported_key\""
+    index: s64 = 0
+    while index + field.count < json.count {
+        if !AccountStartsWith(json[index:json.count], field) {
+            index += 1
+            continue
+        }
+        index += field.count
+        while index < json.count && AccountJsonWhitespace(json[index]) { index += 1 }
+        if index >= json.count || json[index] != cast(u8)58 { return false }
+        index += 1
+        while index < json.count && AccountJsonWhitespace(json[index]) { index += 1 }
+        if index >= json.count || json[index] != cast(u8)34 { return false }
+        index += 1
+        used: s64 = 0
+        while index < json.count && json[index] != cast(u8)34 {
+            byte := json[index]
+            if byte == cast(u8)92 {
+                index += 1
+                if index >= json.count { return false }
+                escaped := json[index]
+                if escaped == cast(u8)110 { byte = cast(u8)10 }
+                else if escaped == cast(u8)114 { byte = cast(u8)13 }
+                else if escaped == cast(u8)116 { byte = cast(u8)9 }
+                else if escaped == cast(u8)92 || escaped == cast(u8)34 { byte = escaped }
+                else { return false }
+            }
+            if byte == 0 || used >= output.count - 1 { return false }
+            output[used] = byte
+            used += 1
+            index += 1
+        }
+        if index >= json.count || used == 0 { return false }
+        output[used] = 0
+        return true
+    }
+    return false
+}
+
+ValidateAccountKeys :: (account: *AccountKeys) -> s32 {
+    if account == null { return 0 }
+    public_key: [1312]u8
+    private_key: [2560]u8
+    expected_id: [ACCOUNT_PUBLIC_ID_HEX_SIZE]u8
+    public_text := AccountBufferText(*account.public_key_hex[0], ACCOUNT_PUBLIC_KEY_HEX_SIZE)
+    private_text := AccountBufferText(*account.private_key_hex[0], ACCOUNT_PRIVATE_KEY_HEX_SIZE)
+    if HexToBytes(public_text, *public_key[0], 1312) == 0 ||
+        HexToBytes(private_text, *private_key[0], 2560) == 0 {
+        return 0
+    }
+    Sha256Hex(*public_key[0], 1312, *expected_id[0])
+    id := AccountBufferText(*account.public_id[0], ACCOUNT_PUBLIC_ID_HEX_SIZE)
+    if id.count == 0 {
+        index: s64 = 0
+        while index < ACCOUNT_PUBLIC_ID_HEX_SIZE {
+            account.public_id[index] = expected_id[index]
+            index += 1
+        }
+        return 1
+    }
+    if id.count != 64 { return 0 }
+    index: s64 = 0
+    while index < 65 {
+        if account.public_id[index] != expected_id[index] { return 0 }
+        index += 1
+    }
+    return 1
+}
+
+#program_export
+ParseAccountKeys :: (body: string, account: *AccountKeys) -> s32 {
+    if account == null { return 0 }
+    account.* = AccountKeys.{}
+    if body.count == 0 || body.count >= ACCOUNT_EXPORT_ENCRYPTED_TEXT_SIZE {
+        return 0
+    }
+    if body.count >= 3 && body[0] == cast(u8)239 &&
+        body[1] == cast(u8)187 && body[2] == cast(u8)191 {
+        body = body[3:body.count]
+    }
+    json_body: [ACCOUNT_EXPORT_TEXT_SIZE]u8
+    json_start: s64 = 0
+    while json_start < body.count && AccountJsonWhitespace(body[json_start]) {
+        json_start += 1
+    }
+    if json_start < body.count && body[json_start] == cast(u8)123 {
+        if !AccountJsonExportedKey(body, json_body[:]) { return 0 }
+        body = AccountBufferText(*json_body[0], ACCOUNT_EXPORT_TEXT_SIZE)
+    }
+    if AccountStartsWith(body, "ksync-account-key-v2") { return 0 }
+    cursor: s64 = 0
+    while cursor < body.count {
+        finish := cursor
+        while finish < body.count && body[finish] != cast(u8)10 { finish += 1 }
+        line := body[cursor:finish]
+        if AccountStartsWith(line, "public_id=") {
+            if !AccountField(line, "public_id=", account.public_id[:]) { return 0 }
+        } else if AccountStartsWith(line, "public_key=") {
+            if !AccountField(line, "public_key=", account.public_key_hex[:]) { return 0 }
+        } else if AccountStartsWith(line, "private_key=") {
+            if !AccountField(line, "private_key=", account.private_key_hex[:]) { return 0 }
+        } else if AccountStartsWith(line, "secret_key=") {
+            if !AccountField(line, "secret_key=", account.private_key_hex[:]) { return 0 }
+        }
+        cursor = finish + 1
+    }
+    if ValidateAccountKeys(account) == 0 {
+        account.* = AccountKeys.{}
+        return 0
+    }
+    return 1
+}
+
+
+AccountEncryptedHeader :: "ksync-account-key-v2"
+AccountEncryptedSaltBytes :: 16
+AccountEncryptedNonceBytes :: 12
+AccountEncryptedTagBytes :: 16
+
+#program_export
+AccountDerivePassphraseKey :: (passphrase: string,
+    salt: *u8, output: *u8, iterations: u64) -> bool {
+    if salt == null || output == null {
+        return false
+    }
+    salted: [64]u8 = .[0]
+    context: string = AccountEncryptedHeader
+    if context.count != 20 {
+        return false
+    }
+    index: s32 = 0
+    while index < 20 {
+        salted[index] = context[index]
+        index += 1
+    }
+    salt_index: s32 = 0
+    while salt_index < AccountEncryptedSaltBytes {
+        salted[20 + salt_index] = salt[salt_index]
+        salt_index += 1
+    }
+    return Pbkdf2Sha256Text(passphrase, *salted[0],
+        36, iterations, output) != 0
+}
+
+AccountAppendHex :: (output: *u8, capacity: s64,
+    cursor: *s64, bytes: *u8, byte_length: s64) -> bool {
+    if output == null || cursor == null || bytes == null ||
+        capacity <= 0 || cursor.* < 0 || cursor.* >= capacity ||
+        byte_length < 0 || byte_length > (capacity - cursor.* - 1) / 2 {
+        return false
+    }
+    if BytesToHex(bytes, byte_length,
+        *output[cursor.*], capacity - cursor.*) == 0 {
+        return false
+    }
+    cursor.* += byte_length * 2
+    return true
+}
+
+AccountEncryptedLineValue :: (body: string, prefix: string) -> string {
+    cursor: s64 = 0
+    while cursor < body.count {
+        finish := cursor
+        while finish < body.count && body[finish] != cast(u8)10 {
+            finish += 1
+        }
+        line := body[cursor:finish]
+        if AccountStartsWith(line, prefix) {
+            return AccountTrimValue(line[prefix.count:line.count])
+        }
+        cursor = finish + 1
+    }
+    return ""
+}
+
+AccountParseIterations :: (text: string) -> u64 {
+    if text.count == 0 {
+        return 0
+    }
+    value: u64 = 0
+    index: s64 = 0
+    while index < text.count {
+        byte := text[index]
+        if byte < cast(u8)48 || byte > cast(u8)57 {
+            return 0
+        }
+        digit := cast(u64)(byte - cast(u8)48)
+        if value > (cast(u64)100000000 - digit) / 10 {
+            return 0
+        }
+        value = value * 10 + digit
+        index += 1
+    }
+    return value
+}
+
+#program_export
+AccountKeysEncryptedText :: (account: *AccountKeys,
+    passphrase: string, output: *u8, output_capacity: s64) -> s32 {
+    if output == null || output_capacity <= 0 {
+        return 0
+    }
+    output[0] = 0
+    if account == null || passphrase.count == 0 ||
+        account.public_id[0] == 0 || account.public_key_hex[0] == 0 ||
+        account.private_key_hex[0] == 0 {
+        return 0
+    }
+
+    plaintext: [ACCOUNT_EXPORT_TEXT_SIZE]u8
+    salt: [AccountEncryptedSaltBytes]u8
+    nonce: [AccountEncryptedNonceBytes]u8
+    key: [32]u8
+    sealed: [ACCOUNT_EXPORT_TEXT_SIZE + AccountEncryptedTagBytes]u8
+    if AccountKeysText(account, *plaintext[0],
+        ACCOUNT_EXPORT_TEXT_SIZE) == 0 {
+        return 0
+    }
+    plain_length := AccountBufferText(*plaintext[0],
+        ACCOUNT_EXPORT_TEXT_SIZE).count
+    if SecureRandom(*salt[0], AccountEncryptedSaltBytes) == 0 ||
+        SecureRandom(*nonce[0], AccountEncryptedNonceBytes) == 0 ||
+        !AccountDerivePassphraseKey(passphrase, *salt[0], *key[0],
+            ACCOUNT_PASSPHRASE_ITERATIONS) ||
+        ChaCha20Poly1305Seal(*key[0], *nonce[0],
+            *plaintext[0], plain_length, null, 0, *sealed[0],
+            size_of(type_of(sealed))) == 0 {
+        return 0
+    }
+
+    sealed_length := plain_length + AccountEncryptedTagBytes
+    cursor: s64 = 0
+    if !AccountTextAppend(output, output_capacity, *cursor,
+        "ksync-account-key-v2\nalgorithm=ML-DSA-44\nkdf=PBKDF2-SHA256\niterations=600000\nsalt=") ||
+        !AccountAppendHex(output, output_capacity, *cursor,
+            *salt[0], AccountEncryptedSaltBytes) ||
+        !AccountTextAppend(output, output_capacity, *cursor, "\nnonce=") ||
+        !AccountAppendHex(output, output_capacity, *cursor,
+            *nonce[0], AccountEncryptedNonceBytes) ||
+        !AccountTextAppend(output, output_capacity, *cursor, "\nciphertext=") ||
+        !AccountAppendHex(output, output_capacity, *cursor,
+            *sealed[0], sealed_length) {
+        output[0] = 0
+        return 0
+    }
+    return 1
+}
+
+#program_export
+ParseEncryptedAccountKeys :: (body: string,
+    passphrase: string, account: *AccountKeys) -> s32 {
+    if account == null {
+        return 0
+    }
+    account.* = AccountKeys.{}
+    if body.count == 0 || body.count >= ACCOUNT_EXPORT_ENCRYPTED_TEXT_SIZE ||
+        passphrase.count == 0 {
+        return 0
+    }
+    if body.count >= 3 && body[0] == cast(u8)239 &&
+        body[1] == cast(u8)187 && body[2] == cast(u8)191 {
+        body = body[3:body.count]
+    }
+    if !AccountStartsWith(body, AccountEncryptedHeader) {
+        return 0
+    }
+
+    iterations := AccountParseIterations(AccountEncryptedLineValue(body,
+        "iterations="))
+    salt_text := AccountEncryptedLineValue(body, "salt=")
+    nonce_text := AccountEncryptedLineValue(body, "nonce=")
+    sealed_text := AccountEncryptedLineValue(body, "ciphertext=")
+    if iterations == 0 || salt_text.count != AccountEncryptedSaltBytes * 2 ||
+        nonce_text.count != AccountEncryptedNonceBytes * 2 ||
+        sealed_text.count <= AccountEncryptedTagBytes * 2 ||
+        sealed_text.count % 2 != 0 ||
+        sealed_text.count / 2 > ACCOUNT_EXPORT_TEXT_SIZE {
+        return 0
+    }
+
+    salt: [AccountEncryptedSaltBytes]u8
+    nonce: [AccountEncryptedNonceBytes]u8
+    key: [32]u8
+    sealed: [ACCOUNT_EXPORT_TEXT_SIZE]u8
+    plaintext: [ACCOUNT_EXPORT_TEXT_SIZE]u8
+    sealed_length := sealed_text.count / 2
+    plain_length := sealed_length - AccountEncryptedTagBytes
+    if HexToBytes(salt_text, *salt[0], AccountEncryptedSaltBytes) == 0 ||
+        HexToBytes(nonce_text, *nonce[0], AccountEncryptedNonceBytes) == 0 ||
+        HexToBytes(sealed_text, *sealed[0], sealed_length) == 0 ||
+        !AccountDerivePassphraseKey(passphrase, *salt[0], *key[0], iterations) ||
+        ChaCha20Poly1305Open(*key[0], *nonce[0],
+            *sealed[0], sealed_length, null, 0,
+            *plaintext[0], ACCOUNT_EXPORT_TEXT_SIZE) == 0 {
+        return 0
+    }
+    plaintext[plain_length] = 0
+    text := AccountBufferText(*plaintext[0],
+        plain_length + 1)
+    if text.count != plain_length || ParseAccountKeys(text, account) == 0 {
+        account.* = AccountKeys.{}
+        return 0
+    }
+    return 1
+}
+
+AccountCopyText :: (value: string, output: []u8) -> bool {
+    if value.count >= output.count { return false }
+    index: s64 = 0
+    while index < value.count {
+        byte: u8 = value[index]
+        if byte == cast(u8)0 { return false }
+        output[index] = byte
+        index += 1
+    }
+    output[value.count] = cast(u8)0
+    return true
+}

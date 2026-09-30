@@ -1,0 +1,795 @@
+// Account and record cryptography for Daochi apps: SHA-256, HMAC-SHA-256,
+// PBKDF2-HMAC-SHA-256, and RFC 8439 ChaCha20-Poly1305, with hex encoding.
+// All of it is plain Ziran; the signatures themselves come from the Oqs
+// package. The functions take byte pointers and lengths and return 1 on
+// success, 0 on invalid input.
+
+Sha256Context :: struct {
+    state: [8]u32
+    bit_length: u64
+    block: [64]u8
+    block_length: s32
+}
+
+Sha256RoundConstants: [64]u32 = .[
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+];
+
+Sha256RotateRight :: (value: u32, bits: u32) -> u32 {
+    return (value >> bits) | (value << (cast(u32)32 - bits))
+}
+
+Sha256Transform :: (context: *Sha256Context) {
+    words: [64]u32
+    index: s32 = 0
+    while index < 16 {
+        byte_index := index * 4
+        words[index] =
+            (cast(u32)context.block[byte_index] << cast(u32)24) |
+            (cast(u32)context.block[byte_index + 1] << cast(u32)16) |
+            (cast(u32)context.block[byte_index + 2] << cast(u32)8) |
+            cast(u32)context.block[byte_index + 3]
+        index += 1
+    }
+    while index < 64 {
+        prior_15 := words[index - 15]
+        prior_2 := words[index - 2]
+        sigma_0 := (Sha256RotateRight(prior_15, 7) ^
+            Sha256RotateRight(prior_15, 18) ^ (prior_15 >> cast(u32)3))
+        sigma_1 := (Sha256RotateRight(prior_2, 17) ^
+            Sha256RotateRight(prior_2, 19) ^ (prior_2 >> cast(u32)10))
+        words[index] = (words[index - 16] + sigma_0 +
+            words[index - 7] + sigma_1)
+        index += 1
+    }
+
+    a := context.state[0]
+    b := context.state[1]
+    c := context.state[2]
+    d := context.state[3]
+    e := context.state[4]
+    f := context.state[5]
+    g := context.state[6]
+    h := context.state[7]
+    index = 0
+    while index < 64 {
+        sigma_1 := (Sha256RotateRight(e, 6) ^
+            Sha256RotateRight(e, 11) ^ Sha256RotateRight(e, 25))
+        choose := (e & f) ^ ((~e) & g)
+        temp_1 := (h + sigma_1 + choose + Sha256RoundConstants[index] + words[index])
+        sigma_0 := (Sha256RotateRight(a, 2) ^
+            Sha256RotateRight(a, 13) ^ Sha256RotateRight(a, 22))
+        majority := (a & b) ^ (a & c) ^ (b & c)
+        temp_2 := sigma_0 + majority
+        h = g
+        g = f
+        f = e
+        e = d + temp_1
+        d = c
+        c = b
+        b = a
+        a = temp_1 + temp_2
+        index += 1
+    }
+    context.state[0] += a
+    context.state[1] += b
+    context.state[2] += c
+    context.state[3] += d
+    context.state[4] += e
+    context.state[5] += f
+    context.state[6] += g
+    context.state[7] += h
+}
+
+Sha256Initialize :: (context: *Sha256Context) {
+    context.state[0] = 0x6a09e667
+    context.state[1] = 0xbb67ae85
+    context.state[2] = 0x3c6ef372
+    context.state[3] = 0xa54ff53a
+    context.state[4] = 0x510e527f
+    context.state[5] = 0x9b05688c
+    context.state[6] = 0x1f83d9ab
+    context.state[7] = 0x5be0cd19
+    context.bit_length = 0
+    context.block_length = 0
+}
+
+Sha256Update :: (context: *Sha256Context, data: *u8, length: s64) {
+    index: s64 = 0
+    while index < length {
+        context.block[context.block_length] = data[index]
+        context.block_length += 1
+        if context.block_length == 64 {
+            Sha256Transform(context)
+            context.bit_length += 512
+            context.block_length = 0
+        }
+        index += 1
+    }
+}
+
+Sha256Finish :: (context: *Sha256Context, output: *u8) {
+    tail_length := context.block_length
+    index := tail_length
+    context.block[index] = cast(u8)0x80
+    index += 1
+    if index > 56 {
+        while index < 64 {
+            context.block[index] = 0
+            index += 1
+        }
+        Sha256Transform(context)
+        index = 0
+    }
+    while index < 56 {
+        context.block[index] = 0
+        index += 1
+    }
+    context.bit_length += cast(u64)tail_length * cast(u64)8
+    index = 0
+    while index < 8 {
+        context.block[63 - index] = cast(u8)(context.bit_length >> cast(u64)(index * 8))
+        index += 1
+    }
+    Sha256Transform(context)
+
+    byte_index: s32 = 0
+    while byte_index < 4 {
+        state_index: s32 = 0
+        while state_index < 8 {
+            output[state_index * 4 + byte_index] =
+                cast(u8)(context.state[state_index] >>
+                    cast(u32)(24 - byte_index * 8))
+            state_index += 1
+        }
+        byte_index += 1
+    }
+}
+
+#program_export
+Sha256 :: (data: *u8, length: s64, output: *u8) {
+    if output == null || length < 0 || (data == null && length > 0) {
+        return
+    }
+    context: Sha256Context
+    Sha256Initialize(*context)
+    if length > 0 {
+        Sha256Update(*context, data, length)
+    }
+    Sha256Finish(*context, output)
+}
+
+HexCharacter :: (value: u8) -> u8 {
+    if value < 10 {
+        return cast(u8)48 + value
+    }
+    return cast(u8)87 + value
+}
+
+HexNibble :: (value: u8) -> s32 {
+    if value >= cast(u8)48 && value <= cast(u8)57 {
+        return cast(s32)(value - cast(u8)48)
+    }
+    if value >= cast(u8)97 && value <= cast(u8)102 {
+        return cast(s32)(value - cast(u8)97) + 10
+    }
+    if value >= cast(u8)65 && value <= cast(u8)70 {
+        return cast(s32)(value - cast(u8)65) + 10
+    }
+    return -1
+}
+
+#program_export
+BytesToHex :: (bytes: *u8, length: s64,
+    output: *u8, output_size: s64) -> s32 {
+    if output == null || output_size <= 0 {
+        return 0
+    }
+    output[0] = 0
+    if bytes == null || length < 0 || length > (output_size - 1) / 2 {
+        return 0
+    }
+    index: s64 = 0
+    while index < length {
+        byte := bytes[index]
+        output[index * 2] = HexCharacter(byte >> cast(u8)4)
+        output[index * 2 + 1] = HexCharacter(byte & cast(u8)15)
+        index += 1
+    }
+    output[length * 2] = 0
+    return 1
+}
+
+#program_export
+HexToBytes :: (hex: string, output: *u8, output_size: s64) -> s32 {
+    if output == null || output_size < 0 ||
+        output_size > 4611686018427387903 ||
+        cast(s64)hex.count != output_size * 2 {
+        return 0
+    }
+    index: s64 = 0
+    while index < output_size {
+        high := HexNibble(hex[index * 2])
+        low := HexNibble(hex[index * 2 + 1])
+        if high < 0 || low < 0 {
+            return 0
+        }
+        output[index] = cast(u8)((high << 4) | low)
+        index += 1
+    }
+    return 1
+}
+
+#program_export
+Sha256Hex :: (data: *u8, length: s64, output: *u8) {
+    if output == null {
+        return
+    }
+    output[0] = 0
+    if length < 0 || (data == null && length > 0) {
+        return
+    }
+    digest: [32]u8
+    Sha256(data, length, *digest[0])
+    BytesToHex(*digest[0], 32, output, 65)
+}
+
+// HMAC-SHA-256 and PBKDF2 keep the account key-file derivation format.
+// Historical PBKDF2 exports included at most 32 salt bytes.
+HmacBlockBytes :: 64
+Sha256DigestBytes :: 32
+
+Sha256UpdateText :: (context: *Sha256Context, value: string) {
+    index: s64 = 0
+    while index < value.count {
+        context.block[context.block_length] = value[index]
+        context.block_length += 1
+        if context.block_length == 64 {
+            Sha256Transform(context)
+            context.bit_length += 512
+            context.block_length = 0
+        }
+        index += 1
+    }
+}
+
+HmacSha256Input :: (key: *u8, key_length: s64,
+    key_text: string, use_key_text: bool,
+    data: *u8, data_length: s64, text: string,
+    use_text: bool, output: *u8) -> s32 {
+    if output == null {
+        return 0
+    }
+    if key_length < 0 || data_length < 0 ||
+        (!use_key_text && key == null && key_length > 0) ||
+        (!use_text && data == null && data_length > 0) {
+        return 0
+    }
+
+    block: [HmacBlockBytes]u8 = .[0]
+    pad: [HmacBlockBytes]u8
+    inner: [Sha256DigestBytes]u8
+    context: Sha256Context
+
+    if key_length > HmacBlockBytes {
+        if use_key_text {
+            Sha256Initialize(*context)
+            Sha256UpdateText(*context, key_text)
+            Sha256Finish(*context, *block[0])
+        } else {
+            Sha256(key, key_length, *block[0])
+        }
+    } else {
+        index: s64 = 0
+        while index < key_length {
+            if use_key_text {
+                block[index] = key_text[index]
+            } else {
+                block[index] = key[index]
+            }
+            index += 1
+        }
+    }
+
+    index: s32 = 0
+    while index < HmacBlockBytes {
+        pad[index] = block[index] ^ cast(u8)0x36
+        index += 1
+    }
+    Sha256Initialize(*context)
+    Sha256Update(*context, *pad[0], HmacBlockBytes)
+    if use_text {
+        Sha256UpdateText(*context, text)
+    } else if data_length > 0 {
+        Sha256Update(*context, data, data_length)
+    }
+    Sha256Finish(*context, *inner[0])
+
+    index = 0
+    while index < HmacBlockBytes {
+        pad[index] = block[index] ^ cast(u8)0x5c
+        index += 1
+    }
+    Sha256Initialize(*context)
+    Sha256Update(*context, *pad[0], HmacBlockBytes)
+    Sha256Update(*context, *inner[0], Sha256DigestBytes)
+    Sha256Finish(*context, output)
+    return 1
+}
+
+#program_export
+HmacSha256 :: (key: *u8, key_length: s64,
+    data: *u8, data_length: s64, output: *u8) -> s32 {
+    return HmacSha256Input(key, key_length, "", false,
+        data, data_length,
+        "", false, output)
+}
+
+#program_export
+HmacSha256Text :: (key: *u8, key_length: s64,
+    data: string, output: *u8) -> s32 {
+    return HmacSha256Input(key, key_length, "", false,
+        null, data.count,
+        data, true, output)
+}
+
+HmacSha256TextKey :: (key: string, data: *u8,
+    data_length: s64, output: *u8) -> s32 {
+    return HmacSha256Input(null, key.count, key, true,
+        data, data_length, "", false, output)
+}
+
+Pbkdf2Hmac :: (password: *u8, password_length: s64,
+    password_text: string, use_text: bool, data: *u8,
+    data_length: s64, output: *u8) -> s32 {
+    if use_text {
+        return HmacSha256TextKey(password_text, data, data_length, output)
+    }
+    return HmacSha256(password, password_length,
+        data, data_length, output)
+}
+
+Pbkdf2Input :: (password: *u8, password_length: s64,
+    password_text: string, use_text: bool,
+    salt: *u8, salt_length: s64, iterations: u64, output: *u8) -> s32 {
+    if output == null || iterations == 0 || iterations > 100000000 ||
+        password_length < 0 || salt_length < 0 ||
+        (!use_text && password == null && password_length > 0) ||
+        (salt == null && salt_length > 0) {
+        return 0
+    }
+
+    salt_block: [36]u8 = .[0]
+    used: s64 = salt_length
+    if used > 32 {
+        used = 32
+    }
+    index: s64 = 0
+    while index < used {
+        salt_block[index] = salt[index]
+        index += 1
+    }
+    salt_block[used + 3] = 1
+
+    current: [Sha256DigestBytes]u8
+    aggregate: [Sha256DigestBytes]u8
+    if Pbkdf2Hmac(password, password_length, password_text, use_text,
+        *salt_block[0], used + 4, *current[0]) == 0 {
+        return 0
+    }
+    index = 0
+    while index < Sha256DigestBytes {
+        aggregate[index] = current[index]
+        index += 1
+    }
+
+    round: u64 = 1
+    while round < iterations {
+        if Pbkdf2Hmac(password, password_length, password_text, use_text,
+            *current[0], Sha256DigestBytes, *current[0]) == 0 {
+            return 0
+        }
+        index = 0
+        while index < Sha256DigestBytes {
+            aggregate[index] ^= current[index]
+            index += 1
+        }
+        round += 1
+    }
+    index = 0
+    while index < Sha256DigestBytes {
+        output[index] = aggregate[index]
+        index += 1
+    }
+    return 1
+}
+
+#program_export
+Pbkdf2Sha256 :: (password: *u8, password_length: s64,
+    salt: *u8, salt_length: s64, iterations: u64, output: *u8) -> s32 {
+    return Pbkdf2Input(password, password_length, "", false,
+        salt, salt_length, iterations, output)
+}
+
+#program_export
+Pbkdf2Sha256Text :: (password: string, salt: *u8,
+    salt_length: s64, iterations: u64, output: *u8) -> s32 {
+    return Pbkdf2Input(null, password.count, password, true,
+        salt, salt_length, iterations, output)
+}
+
+// Poly1305 over 26-bit limbs for RFC 8439 encrypted records.
+
+Poly1305State :: struct {
+    r: [5]u64
+    scaled: [4]u64
+    h: [5]u64
+}
+
+Poly1305Load32 :: (bytes: *u8) -> u32 {
+    return cast(u32)bytes[0] |
+        (cast(u32)bytes[1] << cast(u32)8) |
+        (cast(u32)bytes[2] << cast(u32)16) |
+        (cast(u32)bytes[3] << cast(u32)24)
+}
+
+Poly1305Store32 :: (bytes: *u8, value: u32) {
+    bytes[0] = cast(u8)value
+    bytes[1] = cast(u8)(value >> cast(u32)8)
+    bytes[2] = cast(u8)(value >> cast(u32)16)
+    bytes[3] = cast(u8)(value >> cast(u32)24)
+}
+
+Poly1305Initialize :: (state: *Poly1305State, key: *u8) {
+    state.* = Poly1305State.{}
+    state.r[0] = cast(u64)Poly1305Load32(key) & cast(u64)0x3ffffff
+    state.r[1] = cast(u64)(Poly1305Load32(*key[3]) >> cast(u32)2) & cast(u64)0x3ffff03
+    state.r[2] = cast(u64)(Poly1305Load32(*key[6]) >> cast(u32)4) & cast(u64)0x3ffc0ff
+    state.r[3] = cast(u64)(Poly1305Load32(*key[9]) >> cast(u32)6) & cast(u64)0x3f03fff
+    state.r[4] = cast(u64)(Poly1305Load32(*key[12]) >> cast(u32)8) & cast(u64)0x00fffff
+    state.scaled[0] = state.r[1] * 5
+    state.scaled[1] = state.r[2] * 5
+    state.scaled[2] = state.r[3] * 5
+    state.scaled[3] = state.r[4] * 5
+}
+
+Poly1305Block :: (state: *Poly1305State, message: *u8, length: s32) {
+    block: [17]u8 = .[0]
+    index: s32 = 0
+    while index < length {
+        block[index] = message[index]
+        index += 1
+    }
+    if length < 16 {
+        block[length] = 1
+    }
+
+    input: [5]u64
+    input[0] = cast(u64)Poly1305Load32(*block[0]) & cast(u64)0x3ffffff
+    input[1] = cast(u64)(Poly1305Load32(*block[3]) >> cast(u32)2) & cast(u64)0x3ffffff
+    input[2] = cast(u64)(Poly1305Load32(*block[6]) >> cast(u32)4) & cast(u64)0x3ffffff
+    input[3] = cast(u64)(Poly1305Load32(*block[9]) >> cast(u32)6) & cast(u64)0x3ffffff
+    input[4] = cast(u64)(Poly1305Load32(*block[12]) >> cast(u32)8)
+    if length == 16 {
+        input[4] |= cast(u64)1 << cast(u64)24
+    }
+
+    index = 0
+    while index < 5 {
+        state.h[index] += input[index]
+        index += 1
+    }
+
+    d0 := state.h[0] * state.r[0] + state.h[1] * state.scaled[3] +
+        state.h[2] * state.scaled[2] + state.h[3] * state.scaled[1] +
+        state.h[4] * state.scaled[0]
+    d1 := state.h[1] * state.r[0] + state.h[2] * state.scaled[3] +
+        state.h[3] * state.scaled[2] + state.h[4] * state.scaled[1] +
+        state.h[0] * state.r[1]
+    d2 := state.h[2] * state.r[0] + state.h[3] * state.scaled[3] +
+        state.h[4] * state.scaled[2] + state.h[0] * state.r[2] +
+        state.h[1] * state.r[1]
+    d3 := state.h[3] * state.r[0] + state.h[4] * state.scaled[3] +
+        state.h[0] * state.r[3] + state.h[1] * state.r[2] +
+        state.h[2] * state.r[1]
+    d4 := state.h[4] * state.r[0] + state.h[0] * state.r[4] +
+        state.h[1] * state.r[3] + state.h[2] * state.r[2] +
+        state.h[3] * state.r[1]
+
+    carry := d0 >> cast(u64)26
+    state.h[0] = d0 & cast(u64)0x3ffffff
+    d1 += carry
+    carry = d1 >> cast(u64)26
+    state.h[1] = d1 & cast(u64)0x3ffffff
+    d2 += carry
+    carry = d2 >> cast(u64)26
+    state.h[2] = d2 & cast(u64)0x3ffffff
+    d3 += carry
+    carry = d3 >> cast(u64)26
+    state.h[3] = d3 & cast(u64)0x3ffffff
+    d4 += carry
+    carry = d4 >> cast(u64)26
+    state.h[4] = d4 & cast(u64)0x3ffffff
+    state.h[0] += carry * 5
+    carry = state.h[0] >> cast(u64)26
+    state.h[0] &= cast(u64)0x3ffffff
+    state.h[1] += carry
+}
+
+Poly1305AeadPadded :: (state: *Poly1305State, data: *u8, length: s64) {
+    offset: s64 = 0
+    while length - offset >= 16 {
+        Poly1305Block(state, *data[offset], 16)
+        offset += 16
+    }
+    if offset < length {
+        padded: [16]u8 = .[0]
+        index: s32 = 0
+        while cast(s64)index < length - offset {
+            padded[index] = data[offset + cast(s64)index]
+            index += 1
+        }
+        Poly1305Block(state, *padded[0], 16)
+    }
+}
+
+Poly1305Finish :: (state: *Poly1305State, key: *u8, tag: *u8) {
+    carry := state.h[1] >> cast(u64)26
+    state.h[1] &= cast(u64)0x3ffffff
+    state.h[2] += carry
+    carry = state.h[2] >> cast(u64)26
+    state.h[2] &= cast(u64)0x3ffffff
+    state.h[3] += carry
+    carry = state.h[3] >> cast(u64)26
+    state.h[3] &= cast(u64)0x3ffffff
+    state.h[4] += carry
+    carry = state.h[4] >> cast(u64)26
+    state.h[4] &= cast(u64)0x3ffffff
+    state.h[0] += carry * 5
+    carry = state.h[0] >> cast(u64)26
+    state.h[0] &= cast(u64)0x3ffffff
+    state.h[1] += carry
+
+    reduced: [5]u64
+    reduced[0] = state.h[0] + 5
+    carry = reduced[0] >> cast(u64)26
+    reduced[0] &= cast(u64)0x3ffffff
+    reduced[1] = state.h[1] + carry
+    carry = reduced[1] >> cast(u64)26
+    reduced[1] &= cast(u64)0x3ffffff
+    reduced[2] = state.h[2] + carry
+    carry = reduced[2] >> cast(u64)26
+    reduced[2] &= cast(u64)0x3ffffff
+    reduced[3] = state.h[3] + carry
+    carry = reduced[3] >> cast(u64)26
+    reduced[3] &= cast(u64)0x3ffffff
+    reduced[4] = state.h[4] + carry - (cast(u64)1 << cast(u64)26)
+
+    use_reduced := (reduced[4] >> cast(u64)63) - 1
+    index: s32 = 0
+    while index < 5 {
+        state.h[index] = (state.h[index] & ~use_reduced) |
+            (reduced[index] & use_reduced)
+        index += 1
+    }
+
+    low := state.h[0] | (state.h[1] << cast(u64)26) |
+        ((state.h[2] & cast(u64)0xfff) << cast(u64)52)
+    high := (state.h[2] >> cast(u64)12) |
+        (state.h[3] << cast(u64)14) | (state.h[4] << cast(u64)40)
+
+    word := (low & cast(u64)0xffffffff) + cast(u64)Poly1305Load32(*key[16])
+    Poly1305Store32(tag, cast(u32)word)
+    word = (low >> cast(u64)32) + cast(u64)Poly1305Load32(*key[20]) +
+        (word >> cast(u64)32)
+    Poly1305Store32(*tag[4], cast(u32)word)
+    word = (high & cast(u64)0xffffffff) + cast(u64)Poly1305Load32(*key[24]) +
+        (word >> cast(u64)32)
+    Poly1305Store32(*tag[8], cast(u32)word)
+    word = (high >> cast(u64)32) + cast(u64)Poly1305Load32(*key[28]) +
+        (word >> cast(u64)32)
+    Poly1305Store32(*tag[12], cast(u32)word)
+}
+
+Poly1305AeadTag :: (key: *u8, aad: *u8, aad_length: s64,
+    ciphertext: *u8, ciphertext_length: s64, tag: *u8) {
+    state: Poly1305State
+    Poly1305Initialize(*state, key)
+    if aad_length > 0 {
+        Poly1305AeadPadded(*state, aad, aad_length)
+    }
+    if ciphertext_length > 0 {
+        Poly1305AeadPadded(*state, ciphertext, ciphertext_length)
+    }
+    lengths: [16]u8
+    Poly1305Store32(*lengths[0], cast(u32)aad_length)
+    Poly1305Store32(*lengths[4], cast(u32)(cast(u64)aad_length >> cast(u64)32))
+    Poly1305Store32(*lengths[8], cast(u32)ciphertext_length)
+    Poly1305Store32(*lengths[12], cast(u32)(cast(u64)ciphertext_length >> cast(u64)32))
+    Poly1305Block(*state, *lengths[0], 16)
+    Poly1305Finish(*state, key, tag)
+}
+
+// RFC 8439 ChaCha20-Poly1305 for encrypted records and key files.
+ChaChaBlockBytes :: 64
+ChaChaTagBytes :: 16
+
+ChaChaLengthValid :: (length: s64) -> bool {
+    if length < 0 {
+        return false
+    }
+    full_blocks := length / ChaChaBlockBytes
+    if full_blocks > cast(s64)4294967295 {
+        return false
+    }
+    if full_blocks == cast(s64)4294967295 &&
+        length % ChaChaBlockBytes != 0 {
+        return false
+    }
+    return true
+}
+
+ChaChaRotateLeft :: (value: u32, bits: u32) -> u32 {
+    return (value << bits) | (value >> (cast(u32)32 - bits))
+}
+
+ChaChaQuarterRound :: (state: *u32, a: s32, b: s32, c: s32, d: s32) {
+    state[a] += state[b]
+    state[d] ^= state[a]
+    state[d] = ChaChaRotateLeft(state[d], 16)
+    state[c] += state[d]
+    state[b] ^= state[c]
+    state[b] = ChaChaRotateLeft(state[b], 12)
+    state[a] += state[b]
+    state[d] ^= state[a]
+    state[d] = ChaChaRotateLeft(state[d], 8)
+    state[c] += state[d]
+    state[b] ^= state[c]
+    state[b] = ChaChaRotateLeft(state[b], 7)
+}
+
+ChaChaBlock :: (key: *u8, nonce: *u8, counter: u32, output: *u8) {
+    initial: [16]u32
+    working: [16]u32
+    initial[0] = 0x61707865
+    initial[1] = 0x3320646e
+    initial[2] = 0x79622d32
+    initial[3] = 0x6b206574
+    index: s32 = 0
+    while index < 8 {
+        initial[4 + index] = Poly1305Load32(*key[index * 4])
+        index += 1
+    }
+    initial[12] = counter
+    initial[13] = Poly1305Load32(nonce)
+    initial[14] = Poly1305Load32(*nonce[4])
+    initial[15] = Poly1305Load32(*nonce[8])
+    index = 0
+    while index < 16 {
+        working[index] = initial[index]
+        index += 1
+    }
+
+    round: s32 = 0
+    while round < 10 {
+        ChaChaQuarterRound(*working[0], 0, 4, 8, 12)
+        ChaChaQuarterRound(*working[0], 1, 5, 9, 13)
+        ChaChaQuarterRound(*working[0], 2, 6, 10, 14)
+        ChaChaQuarterRound(*working[0], 3, 7, 11, 15)
+        ChaChaQuarterRound(*working[0], 0, 5, 10, 15)
+        ChaChaQuarterRound(*working[0], 1, 6, 11, 12)
+        ChaChaQuarterRound(*working[0], 2, 7, 8, 13)
+        ChaChaQuarterRound(*working[0], 3, 4, 9, 14)
+        round += 1
+    }
+    index = 0
+    while index < 16 {
+        Poly1305Store32(*output[index * 4], working[index] + initial[index])
+        index += 1
+    }
+}
+
+ChaChaXor :: (key: *u8, nonce: *u8, input: *u8,
+    length: s64, output: *u8) {
+    offset: s64 = 0
+    counter: u32 = 1
+    while offset < length {
+        block: [ChaChaBlockBytes]u8
+        ChaChaBlock(key, nonce, counter, *block[0])
+        count: s64 = length - offset
+        if count > ChaChaBlockBytes {
+            count = ChaChaBlockBytes
+        }
+        index: s64 = 0
+        while index < count {
+            output[offset + index] = input[offset + index] ^ block[index]
+            index += 1
+        }
+        offset += count
+        counter += 1
+    }
+}
+
+ChaChaMacKey :: (key: *u8, nonce: *u8, output: *u8) {
+    block: [ChaChaBlockBytes]u8
+    ChaChaBlock(key, nonce, 0, *block[0])
+    index: s32 = 0
+    while index < 32 {
+        output[index] = block[index]
+        index += 1
+    }
+}
+
+#program_export
+ChaCha20Poly1305Seal :: (key: *u8, nonce: *u8,
+    plain: *u8, plain_length: s64, aad: *u8, aad_length: s64,
+    output: *u8, output_capacity: s64) -> s32 {
+    if key == null || nonce == null || output == null ||
+        !ChaChaLengthValid(plain_length) ||
+        aad_length < 0 ||
+        (plain == null && plain_length > 0) ||
+        (aad == null && aad_length > 0) ||
+        output_capacity < ChaChaTagBytes ||
+        plain_length > output_capacity - ChaChaTagBytes {
+        return 0
+    }
+
+    mac_key: [32]u8
+    tag: [ChaChaTagBytes]u8
+    ChaChaMacKey(key, nonce, *mac_key[0])
+    if plain_length > 0 {
+        ChaChaXor(key, nonce, plain, plain_length, output)
+    }
+    Poly1305AeadTag(*mac_key[0], aad, aad_length,
+        output, plain_length, *tag[0])
+    index: s32 = 0
+    while index < ChaChaTagBytes {
+        output[plain_length + cast(s64)index] = tag[index]
+        index += 1
+    }
+    return 1
+}
+
+#program_export
+ChaCha20Poly1305Open :: (key: *u8, nonce: *u8,
+    sealed: *u8, sealed_length: s64, aad: *u8, aad_length: s64,
+    plain: *u8, plain_capacity: s64) -> s32 {
+    if key == null || nonce == null || sealed == null ||
+        sealed_length < ChaChaTagBytes ||
+        !ChaChaLengthValid(sealed_length - ChaChaTagBytes) ||
+        aad_length < 0 || (aad == null && aad_length > 0) ||
+        plain_capacity < sealed_length - ChaChaTagBytes ||
+        (plain == null && sealed_length > ChaChaTagBytes) {
+        return 0
+    }
+
+    plain_length := sealed_length - ChaChaTagBytes
+    mac_key: [32]u8
+    tag: [ChaChaTagBytes]u8
+    ChaChaMacKey(key, nonce, *mac_key[0])
+    Poly1305AeadTag(*mac_key[0], aad, aad_length,
+        sealed, plain_length, *tag[0])
+    difference: u8 = 0
+    index: s32 = 0
+    while index < ChaChaTagBytes {
+        difference |= tag[index] ^ sealed[plain_length + cast(s64)index]
+        index += 1
+    }
+    if difference != 0 {
+        return 0
+    }
+    if plain_length > 0 {
+        ChaChaXor(key, nonce, sealed, plain_length, plain)
+    }
+    return 1
+}

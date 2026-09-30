@@ -1,14 +1,30 @@
 {
   "format": 1,
   "packages": [
-
+    {
+      "commit": "e6b9e783747536f34700aab4bd10718c2fecab3f",
+      "dependencies": {},
+      "id": "pb34994bf01670ac3",
+      "name": "liboqs",
+      "ref": "main",
+      "source": true,
+      "url": "https://github.com/open-quantum-safe/liboqs.git"
+    },
+    {
+      "commit": "714f11106347d954e8903e88260d36c3044f9dd1",
+      "dependencies": {"liboqs": "pb34994bf01670ac3"},
+      "id": "pfbeb8acb0fb12fb8",
+      "name": "Oqs",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/oqs.git"
+    }
   ],
   "root": {
-    "dependencies": {},
+    "dependencies": {"oqs": "pfbeb8acb0fb12fb8"},
     "name": "DaochiClient"
   },
   "toolchain": {
-    "commit": "73dc1ffafad7c68182fda455c5c3427c86906cd1",
+    "commit": "300cbe8c15ad650f4ed403624ffd7bbb1d24ca33",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }

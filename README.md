@@ -19,8 +19,15 @@ The protocol modules currently provide:
   (`account.zi`).
 - WebSocket URL, event validation, and one event wait through a host callback
   (`events.zi`).
+- account keys: an ML-DSA-44 key pair with its SHA-256 public id, message
+  signing, and the plain (`account-key-v1`) and passphrase-encrypted
+  (`ksync-account-key-v2`) key files (`keys.zi`, signing through the Oqs
+  package);
+- SHA-256, HMAC-SHA-256, PBKDF2, and ChaCha20-Poly1305 (`crypto.zi`).
 
-The application supplies the account signer and body digest. A host supplies
+The application supplies the account signer and body digest; `keys.zi`
+provides both for Daochi account keys (`SignAccountMessage`, `Sha256Hex`), and
+the app still stores the keys. A host supplies
 bounded HTTP requests through `SendRequest`; the host must NUL terminate every
 response buffer, including on error. This keeps private keys in the app's key
 store and keeps platform transport outside the protocol core. Applications

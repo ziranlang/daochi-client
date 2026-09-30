@@ -1,0 +1,97 @@
+#import "keys"
+#import "crypto"
+#import "oqs"
+#import "byte_text_linux"
+#import "text_buffer"
+#import "c_string"
+
+HexIs :: (bytes: *u8, length: s64, expected: string) -> bool {
+    hex: [129]u8
+    if BytesToHex(bytes, length, *hex[0], 129) == 0 {
+        return false
+    }
+    return TextUntilNul(hex[:]) == expected
+}
+
+#program_export
+main :: () -> s32 {
+    digest: [32]u8
+    abc: [3]u8 = .{97, 98, 99}
+    Sha256(*abc[0], 3, *digest[0])
+    if !HexIs(*digest[0], 32, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
+        return 1
+    }
+    // RFC 4231, test case 2.
+    jefe: [4]u8 = .{74, 101, 102, 101}
+    if HmacSha256Text(*jefe[0], 4, "what do ya want for nothing?", *digest[0]) == 0 ||
+        !HexIs(*digest[0], 32, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") {
+        return 2
+    }
+    // PBKDF2-HMAC-SHA-256, password "password", salt "salt", 1 iteration.
+    salt: [4]u8 = .{115, 97, 108, 116}
+    if Pbkdf2Sha256Text("password", *salt[0], 4, 1, *digest[0]) == 0 ||
+        !HexIs(*digest[0], 32, "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b") {
+        return 3
+    }
+
+    account: AccountKeys
+    if CreateAccountKeys(*account) == 0 || ValidateAccountKeys(*account) == 0 {
+        return 4
+    }
+    // The public id is the SHA-256 of the public key.
+    public_key: [1312]u8
+    if HexToBytes(TextUntilNul(account.public_key_hex[:]), *public_key[0], 1312) == 0 {
+        return 5
+    }
+    id: [65]u8
+    Sha256Hex(*public_key[0], 1312, *id[0])
+    if TextUntilNul(id[:]) != TextUntilNul(account.public_id[:]) {
+        return 6
+    }
+
+    message: [32]u8
+    if !CopyCString("daochi-sync-v1 login", message[:]) {
+        return 7
+    }
+    message_length: s64 = 20
+    signature_hex: [ACCOUNT_SIGNATURE_HEX_SIZE]u8
+    if SignAccountKeysHex(*account, *message[0], message_length, *signature_hex[0], ACCOUNT_SIGNATURE_HEX_SIZE) == 0 {
+        return 7
+    }
+    signature: [MlDsa44SignatureBytes]u8
+    if HexToBytes(TextUntilNul(signature_hex[:]), *signature[0], MlDsa44SignatureBytes) == 0 ||
+        !MlDsa44Verify(message[0:message_length], signature[:], public_key[:]) {
+        return 8
+    }
+
+    // The plain key file round-trips.
+    text: [ACCOUNT_EXPORT_TEXT_SIZE]u8
+    read: AccountKeys
+    if AccountKeysText(*account, *text[0], ACCOUNT_EXPORT_TEXT_SIZE) == 0 ||
+        ParseAccountKeys(TextUntilNul(text[:]), *read) == 0 || !AccountValuesEqual(*account, *read) {
+        return 9
+    }
+    // The encrypted key file opens only with its passphrase and refuses a
+    // changed byte.
+    sealed: [ACCOUNT_EXPORT_ENCRYPTED_TEXT_SIZE]u8
+    if AccountKeysEncryptedText(*account, "correct horse", *sealed[0], ACCOUNT_EXPORT_ENCRYPTED_TEXT_SIZE) == 0 {
+        return 10
+    }
+    opened: AccountKeys
+    if ParseEncryptedAccountKeys(TextUntilNul(sealed[:]), "correct horse", *opened) == 0 || !AccountValuesEqual(*account, *opened) {
+        return 11
+    }
+    if ParseEncryptedAccountKeys(TextUntilNul(sealed[:]), "wrong horse", *opened) != 0 {
+        return 12
+    }
+    length: s64 = 0
+    while sealed[length] != cast(u8)0 {
+        length += 1
+    }
+    last := length - 2
+    sealed[last] = ifx sealed[last] == cast(u8)48 then cast(u8)49 else cast(u8)48
+    if ParseEncryptedAccountKeys(TextUntilNul(sealed[:]), "correct horse", *opened) != 0 {
+        return 13
+    }
+    return 0
+}
