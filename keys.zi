@@ -1,6 +1,6 @@
 #import "crypto"
 #import "byte_text_linux"
-#import "oqs"
+#import "oqs/Oqs"
 
 // Daochi account keys: an ML-DSA-44 key pair whose public id is the
 // SHA-256 of the public key. This creates and signs with keys and reads and

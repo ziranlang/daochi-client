@@ -1,6 +1,6 @@
 #import "keys"
 #import "crypto"
-#import "oqs"
+#import "oqs/Oqs"
 #import "byte_text_linux"
 #import "text_buffer"
 #import "c_string"

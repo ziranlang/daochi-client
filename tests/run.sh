@@ -42,7 +42,6 @@ echo 'Daochi Ziran asynchronous request and signed sync passed'
 
 # Account keys sign through liboqs, built once from the locked source with
 # only ML-DSA-44, as the Oqs package does.
-oqs_root=$("$ziran_bin" pkg path oqs)
 liboqs_build="$root/build/liboqs"
 if [ ! -f "$liboqs_build/lib/liboqs.a" ]; then
     cmake -S "$("$ziran_bin" pkg path liboqs)" -B "$liboqs_build" \
@@ -51,12 +50,13 @@ if [ ! -f "$liboqs_build/lib/liboqs.a" ]; then
         -DOQS_OPT_TARGET=generic -DOQS_MINIMAL_BUILD=SIG_ml_dsa_44 > /dev/null
     cmake --build "$liboqs_build" --target oqs > /dev/null
 fi
-"$compiler" --no-main --root "$root/tests" \
-    --module-path "$root" --module-path "$oqs_root/src" \
-    --module-path "$ziran/std" -o "$work/keys" "$root/tests/keys_behavior.zi"
+# A project build resolves the Oqs package's qualified import.
+(cd "$root" && "$ziran_bin" build --project --target=c \
+    --entry keys_behavior:main -o "$work/keys" tests/keys_behavior.zi)
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror \
     -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter \
-    -I"$ziran/include" -I"$work/keys" "$work/keys"/*.c \
+    -I"$ziran/include" -I"$work/keys" -I"$work/keys/tests" \
+    "$work/keys"/*.c "$work/keys"/tests/*.c \
     "$liboqs_build/lib/liboqs.a" -o "$work/keys_test"
 env -u DISPLAY -u WAYLAND_DISPLAY "$work/keys_test"
 echo 'Daochi account keys, key files, and cryptography passed'
