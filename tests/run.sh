@@ -2,9 +2,16 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-ziran=${ZIRAN_DIR:-"$root/../ziran"}
+cd "$root"
+unset DISPLAY WAYLAND_DISPLAY
+launcher=${ZIRAN_BIN:-ziran}
+if [ -f ziran.local.toml ]; then
+    ziran=${ZIRAN_DIR:-"$("$launcher" pkg path ziran)"}
+else
+    ziran=${ZIRAN_DIR:-"$("$launcher" pkg path ziran --locked)"}
+fi
 compiler=${ZI2C_BIN:-"$ziran/build/bin/zi2c"}
-ziran_bin=${ZIRAN_BIN:-"$(dirname "$compiler")/ziran"}
+ziran_bin="$ziran/build/bin/ziran"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 

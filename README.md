@@ -55,10 +55,13 @@ context. `CancelRequest` and `CancelSync` release an active transfer and finish
 with `AUTH_REQUEST_FAILED`. Both request modes share the same one-login retry
 after a `401`; sync modes share the exact registration and transaction builders.
 
-`sh tests/run.sh` checks the library using the sibling `ziran` checkout,
-including portable `.zib` URL and wire tests. The wire test also checks a
-saved `.zir` to `.zib` round trip. Set `ZIRAN_DIR` when that checkout is
-elsewhere.
+`sh tests/run.sh` checks the library using the toolchain selected by
+`ziran pkg path ziran`, including portable `.zib` URL and wire tests. An
+ignored `ziran.local.toml` can select the local compiler at
+`../../../ziranlang/ziran`; otherwise the test uses `ziran.lock`. The wire
+test also checks a saved `.zir` to `.zib` round trip. Set `ZIRAN_BIN` to use
+a different launcher, or `ZIRAN_DIR` and `ZI2C_BIN` for explicit compiler
+overrides.
 
 The library does not provision keys, revoke devices, store account data, or
 merge application records. Each app owns those operations and supplies its
