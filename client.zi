@@ -207,33 +207,37 @@ BearerRequestWithHeaders :: (client: Client, session: *Session, now: s64,
     }
     attempt: s32 = 0
     while attempt < 2 {
-        headers: [16]HttpHeader
-        headers[0].name = "X-Daochi-User"
-        headers[0].value = client.identity.account_id
-        headers[1].name = "X-Daochi-Client"
-        headers[1].value = client.identity.client_id
-        header_count: s64 = 2
-        index: s64 = 0
-        while index < cast(s64)extra_headers.count {
-            headers[header_count] = extra_headers[index]
-            header_count += 1
-            index += 1
-        }
-        request: HttpRequest
-        request.method = method
-        request.url = TextUntilNul(url[:])
-        request.token = TextUntilNul(session.token[:])
-        request.accept = "application/json"
-        request.headers = headers[0:header_count]
-        if body.count > 0 {
-            request.body = body
-            request.content_type = "application/json"
-        }
-        output[0] = cast(u8)0
-        status.* = 0
-        if !client.send(client.transport_context, request,
-            output, status) {
-            return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
+        // The synchronous transport is finished before a rejected token is
+        // cleared or replaced. Keep its borrowed request inside that lifetime.
+        {
+            headers: [16]HttpHeader
+            headers[0].name = "X-Daochi-User"
+            headers[0].value = client.identity.account_id
+            headers[1].name = "X-Daochi-Client"
+            headers[1].value = client.identity.client_id
+            header_count: s64 = 2
+            index: s64 = 0
+            while index < cast(s64)extra_headers.count {
+                headers[header_count] = extra_headers[index]
+                header_count += 1
+                index += 1
+            }
+            request: HttpRequest
+            request.method = method
+            request.url = TextUntilNul(url[:])
+            request.token = TextUntilNul(session.token[:])
+            request.accept = "application/json"
+            request.headers = headers[0:header_count]
+            if body.count > 0 {
+                request.body = body
+                request.content_type = "application/json"
+            }
+            output[0] = cast(u8)0
+            status.* = 0
+            if !client.send(client.transport_context, request,
+                output, status) {
+                return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
+            }
         }
         if status.* >= 200 && status.* < 300 {
             return cast(AuthResult)AuthResult.AUTH_OK
