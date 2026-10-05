@@ -1,5 +1,8 @@
 # Daochi Client repository rules
 
+- The canonical checkout is `~/Projects/ziranlang/packages/daochi-client`,
+  on `master`, with origin `https://github.com/ziranlang/daochi-client.git`.
+  This is a general Ziran library; keep it independent of Kryon's UI/runtime.
 - This repository owns reusable Daochi client protocol and request behavior.
   The Daochi Go server and mesh node stay in `daochi`; app storage, merge rules,
   and UI stay in each app; widgets stay in Kryon.
