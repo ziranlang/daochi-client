@@ -2,6 +2,9 @@
 
 Daochi Client is the independent Ziran library for applications that sync with
 Daochi. It contains no server, mesh node, database, or UI implementation.
+It has no Kryon dependency and lives in the
+[Ziran organization](https://github.com/ziranlang/daochi-client). Add it with
+`ziran add https://github.com/ziranlang/daochi-client.git`.
 
 The protocol modules currently provide:
 
@@ -34,8 +37,8 @@ store and keeps platform transport outside the protocol core. Applications
 persist `Session` if they want bearer tokens to survive restart. Account keys
 must remain when a bearer token expires.
 
-Add this repository and Ziran's `std` directory to the Ziran module paths, then
-import `client` and `sync`. Set `Client.app_id`, supply a `Device` with a
+Import the package modules with `#import "daochi_client/client"` and
+`#import "daochi_client/sync"`. Set `Client.app_id`, supply a `Device` with a
 persisted Ed25519 key and signer, and supply a cryptographically random 64-digit
 hex nonce callback. `Sync` registers the device and signs the exact sync body
 with both the account and device keys. The app owns the payload format and
@@ -58,7 +61,7 @@ after a `401`; sync modes share the exact registration and transaction builders.
 `sh tests/run.sh` checks the library using the toolchain selected by
 `ziran pkg path ziran`, including portable `.zib` URL and wire tests. An
 ignored `ziran.local.toml` can select the local compiler at
-`../../../ziranlang/ziran`; otherwise the test uses `ziran.lock`. The wire
+`../../ziran`; otherwise the test uses `ziran.lock`. The wire
 test also checks a saved `.zir` to `.zib` round trip. Set `ZIRAN_BIN` to use
 a different launcher, or `ZIRAN_DIR` and `ZI2C_BIN` for explicit compiler
 overrides.
