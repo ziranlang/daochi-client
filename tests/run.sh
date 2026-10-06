@@ -11,7 +11,12 @@ else
     ziran=${ZIRAN_DIR:-"$("$launcher" pkg path ziran --locked)"}
 fi
 compiler=${ZI2C_BIN:-"$ziran/build/bin/zi2c"}
-ziran_bin="$ziran/build/bin/ziran"
+ziran_bin=${ZIRAN_BIN:-"$(dirname "$compiler")/ziran"}
+if [ -f ziran.local.toml ]; then
+    oqs=${OQS_DIR:-"$("$launcher" pkg path oqs)"}
+else
+    oqs=${OQS_DIR:-"$("$launcher" pkg path oqs --locked)"}
+fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
@@ -48,23 +53,26 @@ env -u DISPLAY -u WAYLAND_DISPLAY "$work/async_test"
 echo 'Daochi Ziran asynchronous request and signed sync passed'
 
 # Account keys sign through liboqs, built once from the locked source with
-# only ML-DSA-44, as the Oqs package does.
+# the algorithms exposed by the Oqs package.
 liboqs_build="$root/build/liboqs"
-if [ ! -f "$liboqs_build/lib/liboqs.a" ]; then
+liboqs=${LIBOQS_A:-"$liboqs_build/lib/liboqs.a"}
+if [ ! -f "$liboqs" ]; then
     cmake -S "$("$ziran_bin" pkg path liboqs)" -B "$liboqs_build" \
         -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_SHARED_LIBS=OFF \
         -DOQS_BUILD_ONLY_LIB=ON -DOQS_USE_OPENSSL=OFF -DOQS_DIST_BUILD=OFF \
-        -DOQS_OPT_TARGET=generic -DOQS_MINIMAL_BUILD=SIG_ml_dsa_44 > /dev/null
+        -DOQS_OPT_TARGET=generic '-DOQS_MINIMAL_BUILD=SIG_ml_dsa_44;KEM_ml_kem_768' > /dev/null
     cmake --build "$liboqs_build" --target oqs > /dev/null
 fi
-# A project build resolves the Oqs package's qualified import.
-(cd "$root" && "$ziran_bin" build --project --target=c \
-    --entry keys_behavior:main -o "$work/keys" tests/keys_behavior.zi)
+# Use the selected compiler for every test. A nested project build can select
+# another toolchain from this package's lock and mix incompatible C headers.
+"$compiler" --no-main --root "$root/tests" --module-path "$root" \
+    --module-path "$ziran/std" --module-path "oqs=$oqs/src" \
+    -o "$work/keys" "$root/tests/keys_behavior.zi"
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror \
     -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter \
     -I"$ziran/include" -I"$work/keys" -I"$work/keys/tests" \
-    "$work/keys"/*.c "$work/keys"/tests/*.c \
-    "$liboqs_build/lib/liboqs.a" -o "$work/keys_test"
+    "$work/keys"/*.c \
+    "$liboqs" -o "$work/keys_test"
 env -u DISPLAY -u WAYLAND_DISPLAY "$work/keys_test"
 echo 'Daochi account keys, key files, and cryptography passed'
 
