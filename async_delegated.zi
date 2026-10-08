@@ -1,0 +1,183 @@
+// Poll-driven counterpart of delegated session renewal and scoped requests.
+#import "delegated"
+#import "authorization"
+#import "async_client"
+#import "auth"
+#import "url"
+#import "net_http"
+#import "text_buffer"
+
+PendingDelegate :: struct {
+    client: DelegateClient
+    session: *DelegateSession
+    transport: AsyncTransport
+    now: s64
+    body: string
+    output: []u8
+    session_only: bool
+    address: [768]u8
+    session_body: [512]u8
+    challenge_json: [2048]u8
+    proof: [4096]u8
+    credential: [46]u8
+    headers: [2]HttpHeader
+    stage: s32
+    waiting: bool
+    done: bool
+    result: AuthResult
+    status: s32
+}
+FinishDelegate :: (pending: *PendingDelegate, result: AuthResult) {
+    pending.waiting = false
+    pending.done = true
+    pending.result = result
+}
+StartDelegateTransfer :: (pending: *PendingDelegate, path: string,
+    body: string, output: []u8, stage: s32, headers: []HttpHeader) {
+    if output.count == 0 || !JoinUrl(pending.client.server_url, path, pending.address[:]) {
+        FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
+        return
+    }
+    request: HttpRequest
+    request.method = "POST"
+    request.url = TextUntilNul(pending.address[:])
+    request.accept = "application/json"
+    request.content_type = "application/json"
+    request.body = body
+    request.headers = headers
+    pending.stage = stage
+    pending.status = 0
+    output[0] = 0
+    if !pending.transport.start(pending.transport.context, request, output) {
+        FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
+        return
+    }
+    pending.waiting = true
+}
+StartDelegateChallenge :: (pending: *PendingDelegate) {
+    ClearDelegateSession(pending.session)
+    if !BuildIDBody("grant_id", pending.client.grant_id, "", pending.session_body[:]) {
+        FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
+        return
+    }
+    StartDelegateTransfer(pending, "/api/v1/authorization/challenge",
+        TextUntilNul(pending.session_body[:]), pending.challenge_json[:], 1, pending.headers[0:0])
+}
+StartDelegateSync :: (pending: *PendingDelegate) {
+    result := PrepareDelegateHeaders(pending.client, pending.session, pending.now,
+        "POST", "/api/v1/delegated/sync", "", pending.body,
+        pending.proof[:], pending.credential[:])
+    if result != cast(AuthResult)AuthResult.AUTH_OK {
+        FinishDelegate(pending, result)
+        return
+    }
+    pending.headers[0].name = "Authorization"
+    pending.headers[0].value = TextUntilNul(pending.credential[:])
+    pending.headers[1].name = "X-Daochi-Delegate"
+    pending.headers[1].value = TextUntilNul(pending.proof[:])
+    StartDelegateTransfer(pending, "/api/v1/delegated/sync", pending.body,
+        pending.output, 3, pending.headers[:])
+}
+InitializeDelegate :: (pending: *PendingDelegate, client: DelegateClient,
+    session: *DelegateSession, now: s64, transport: AsyncTransport,
+    output: []u8, session_only: bool, body: string) -> bool {
+    if pending == null || session == null || pending.waiting ||
+        transport.start == null || transport.poll == null || transport.cancel == null {
+        return false
+    }
+    pending.* = PendingDelegate.{}
+    pending.client = client
+    pending.session = session
+    pending.now = now
+    pending.transport = transport
+    pending.output = output
+    pending.session_only = session_only
+    pending.body = body
+    if !DelegateClientValid(client) || output.count < 8192 || (!session_only && body.count == 0) {
+        FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
+        return true
+    }
+    if SessionValid(client, session, now) {
+        if session_only {
+            FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_OK)
+        } else {
+            StartDelegateSync(pending)
+        }
+    } else {
+        StartDelegateChallenge(pending)
+    }
+    return true
+}
+#scope_export
+BeginDelegateSession :: (pending: *PendingDelegate, client: DelegateClient,
+    session: *DelegateSession, now: s64, transport: AsyncTransport, output: []u8) -> bool {
+    return InitializeDelegate(pending, client, session, now, transport, output, true, "")
+}
+BeginDelegateRequest :: (pending: *PendingDelegate, client: DelegateClient,
+    session: *DelegateSession, now: s64, transport: AsyncTransport,
+    body: string, output: []u8) -> bool {
+    return InitializeDelegate(pending, client, session, now, transport, output, false, body)
+}
+PollDelegate :: (pending: *PendingDelegate) -> bool {
+    if pending == null || pending.done {
+        return true
+    }
+    if !pending.waiting {
+        FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
+        return true
+    }
+    polled := pending.transport.poll(pending.transport.context, *pending.status)
+    if polled < 0 {
+        return false
+    }
+    pending.waiting = false
+    if polled == 0 {
+        FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
+        return true
+    }
+    if pending.stage == 1 {
+        if pending.status != 200 {
+            FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_CHALLENGE_FAILED)
+            return true
+        }
+        challenge: SessionChallenge
+        if !ReadChallenge(TextUntilNul(pending.challenge_json[:]), *challenge) ||
+            !PrepareSessionBody(pending.client, *challenge, pending.now, pending.session_body[:]) {
+            FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_FAILED)
+            return true
+        }
+        StartDelegateTransfer(pending, "/api/v1/authorization/session",
+            TextUntilNul(pending.session_body[:]), pending.output, 2, pending.headers[0:0])
+    } else if pending.stage == 2 {
+        result := AcceptSessionAnswer(pending.client, pending.status,
+            TextUntilNul(pending.output), pending.now, pending.session)
+        if result != cast(AuthResult)AuthResult.AUTH_OK || pending.session_only {
+            FinishDelegate(pending, result)
+            return true
+        }
+        StartDelegateSync(pending)
+    } else if pending.stage == 3 {
+        if pending.status == 401 || pending.status == 403 {
+            ClearDelegateSession(pending.session)
+            FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_FAILED)
+        } else if pending.status < 200 || pending.status >= 300 {
+            FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
+        } else if !ResponseMatchesRequest(pending.client, pending.body, TextUntilNul(pending.output)) {
+            FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
+        } else {
+            FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_OK)
+        }
+    } else {
+        FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
+    }
+    return pending.done
+}
+CancelDelegate :: (pending: *PendingDelegate) {
+    if pending == null || pending.done {
+        return
+    }
+    if pending.waiting {
+        pending.transport.cancel(pending.transport.context)
+    }
+    FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
+}

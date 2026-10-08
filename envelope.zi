@@ -1,0 +1,162 @@
+// Approved collection keys only. The host stores the separate recipient key.
+#import "authorization"
+#import "wire"
+#import "crypto"
+#import "keys"
+#import "oqs/Oqs"
+#import "text_buffer"
+#import "byte_text_linux"
+#import "json_scan"
+
+EncryptionKeys :: struct {
+    public_key: [1184]u8
+    secret_key: [2400]u8
+}
+#scope_export
+CreateEncryptionKeys :: (keys: *EncryptionKeys) -> bool {
+    if keys == null {
+        return false
+    }
+    Cleanse(keys.secret_key[:])
+    keys.* = EncryptionKeys.{}
+    if !MlKem768KeyPair(keys.public_key[:], keys.secret_key[:]) {
+        Cleanse(keys.secret_key[:])
+        return false
+    }
+    return true
+}
+#scope_export
+EncryptionPublicHex :: (keys: *EncryptionKeys, output: []u8) -> bool {
+    return keys != null && output.count >= 2369 &&
+        BytesToHex(*keys.public_key[0], 1184, *output[0], cast(s64)output.count) != 0
+}
+#scope_export
+ClearEncryptionKeys :: (keys: *EncryptionKeys) {
+    if keys != null {
+        Cleanse(keys.secret_key[:])
+        keys.* = EncryptionKeys.{}
+    }
+}
+#scope_export
+BuildEnvelopeAAD :: (grant: Grant, scope: GrantScope, output: []u8) -> bool {
+    if output.count == 0 || !LowerHex(grant.account_id, 64) ||
+        !LowerHex(grant.grant_id, 32) || !LowerHex(grant.node_id, 64) ||
+        !Namespace(grant.app_id) || !Collection(scope.collection) ||
+        !Identifier(scope.key_id, 8, 128) || !LowerHex(grant.encryption_key, 2368) {
+        return false
+    }
+    public_key: [1184]u8
+    recipient_hash: [65]u8
+    if HexToBytes(grant.encryption_key, *public_key[0], 1184) == 0 {
+        return false
+    }
+    Sha256Hex(*public_key[0], 1184, *recipient_hash[0])
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "daochi-collection-key-v1\nML-KEM-768\nChaCha20-Poly1305\n")
+    writer = Line(writer, grant.account_id)
+    writer = Line(writer, grant.grant_id)
+    writer = Line(writer, grant.node_id)
+    writer = Line(writer, grant.app_id)
+    writer = Line(writer, scope.collection)
+    writer = Line(writer, scope.key_id)
+    writer = Line(writer, TextUntilNul(recipient_hash[:]))
+    return writer.valid
+}
+#scope_export
+SealCollectionKey :: (grant: Grant, scope: GrantScope, collection_key: []u8,
+    output: []u8) -> bool {
+    if collection_key.count != 32 || output.count == 0 {
+        return false
+    }
+    output[0] = 0
+    public_key: [1184]u8
+    kem_ciphertext: [1088]u8
+    shared_secret: [32]u8
+    nonce: [12]u8
+    sealed: [48]u8
+    aad: [512]u8
+    if !BuildEnvelopeAAD(grant, scope, aad[:]) ||
+        HexToBytes(grant.encryption_key, *public_key[0], 1184) == 0 ||
+        !MlKem768Encapsulate(kem_ciphertext[:], shared_secret[:], public_key[:]) {
+        Cleanse(shared_secret[:])
+        return false
+    }
+    aad_text := TextUntilNul(aad[:])
+    descriptor: *TextDescriptor = cast(*TextDescriptor)(*aad_text)
+    generated := SecureRandom(*nonce[0], 12) != 0 &&
+        ChaCha20Poly1305Seal(*shared_secret[0], *nonce[0], *collection_key[0], 32,
+            descriptor.data, cast(s64)aad_text.count, *sealed[0], 48) != 0
+    Cleanse(shared_secret[:])
+    if !generated {
+        return false
+    }
+    kem_hex: [2177]u8
+    nonce_hex: [25]u8
+    ciphertext_hex: [97]u8
+    if BytesToHex(*kem_ciphertext[0], 1088, *kem_hex[0], 2177) == 0 ||
+        BytesToHex(*nonce[0], 12, *nonce_hex[0], 25) == 0 ||
+        BytesToHex(*sealed[0], 48, *ciphertext_hex[0], 97) == 0 {
+        return false
+    }
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "{\"version\":1,")
+    writer = JsonTextField(writer, "kem_ciphertext", TextUntilNul(kem_hex[:]))
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "nonce", TextUntilNul(nonce_hex[:]))
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "ciphertext", TextUntilNul(ciphertext_hex[:]))
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+#scope_export
+OpenCollectionKey :: (grant: Grant, scope: GrantScope, keys: *EncryptionKeys,
+    output: []u8) -> bool {
+    Cleanse(output)
+    if keys == null || output.count != 32 || !WholeJson(scope.key_envelope) {
+        return false
+    }
+    public_hex: [2369]u8
+    if !EncryptionPublicHex(keys, public_hex[:]) ||
+        TextUntilNul(public_hex[:]) != grant.encryption_key {
+        return false
+    }
+    positions: [4]s32
+    names: [4]string = .["version", "kem_ciphertext", "nonce", "ciphertext"]
+    version: s64
+    kem_hex: [2177]u8
+    nonce_hex: [25]u8
+    ciphertext_hex: [97]u8
+    if !ObjectFields(scope.key_envelope, 0, names[:], positions[:]) ||
+        !ReadInteger(scope.key_envelope, positions[0], *version) || version != 1 ||
+        ReadStringText(scope.key_envelope, positions[1], kem_hex[:]) < 0 ||
+        ReadStringText(scope.key_envelope, positions[2], nonce_hex[:]) < 0 ||
+        ReadStringText(scope.key_envelope, positions[3], ciphertext_hex[:]) < 0 ||
+        !LowerHex(TextUntilNul(kem_hex[:]), 2176) ||
+        !LowerHex(TextUntilNul(nonce_hex[:]), 24) ||
+        !LowerHex(TextUntilNul(ciphertext_hex[:]), 96) {
+        return false
+    }
+    kem_ciphertext: [1088]u8
+    nonce: [12]u8
+    sealed: [48]u8
+    shared_secret: [32]u8
+    aad: [512]u8
+    if !BuildEnvelopeAAD(grant, scope, aad[:]) ||
+        HexToBytes(TextUntilNul(kem_hex[:]), *kem_ciphertext[0], 1088) == 0 ||
+        HexToBytes(TextUntilNul(nonce_hex[:]), *nonce[0], 12) == 0 ||
+        HexToBytes(TextUntilNul(ciphertext_hex[:]), *sealed[0], 48) == 0 ||
+        !MlKem768Decapsulate(shared_secret[:], kem_ciphertext[:], keys.secret_key[:]) {
+        Cleanse(shared_secret[:])
+        return false
+    }
+    aad_text := TextUntilNul(aad[:])
+    descriptor: *TextDescriptor = cast(*TextDescriptor)(*aad_text)
+    opened := ChaCha20Poly1305Open(*shared_secret[0], *nonce[0], *sealed[0], 48,
+        descriptor.data, cast(s64)aad_text.count, *output[0], 32) != 0
+    Cleanse(shared_secret[:])
+    if !opened {
+        Cleanse(output)
+    }
+    return opened
+}

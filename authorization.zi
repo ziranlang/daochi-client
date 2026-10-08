@@ -1,0 +1,813 @@
+// Owner-signed authorization wire values. Apps own storage and approval UI.
+#import "wire"
+#import "transaction"
+#import "text_buffer"
+#import "json_scan"
+#import "crypto"
+#import "keys"
+#import "oqs/Oqs"
+#import "byte_text_linux"
+
+GrantScope :: struct {
+    collection: string
+    visibility: string
+    read: bool
+    write: bool
+    key_id: string
+    key_envelope: string
+}
+Grant :: struct {
+    version: s32
+    account_id: string
+    grant_id: string
+    request_id: string
+    app_id: string
+    client_id: string
+    node_id: string
+    audience: string
+    signing_key: string
+    encryption_key: string
+    issued_at: s64
+    not_before: s64
+    expires_at: s64
+    nonce: string
+    bot_id: s64
+    telegram_id: s64
+    scopes: []GrantScope
+    signature: string
+}
+ScopeStorage :: struct {
+    collection: [65]u8
+    visibility: [8]u8
+    read: bool
+    write: bool
+    key_id: [129]u8
+    key_envelope: [16385]u8
+}
+GrantStorage :: struct {
+    version: s32
+    account_id: [65]u8
+    grant_id: [33]u8
+    request_id: [33]u8
+    app_id: [65]u8
+    client_id: [65]u8
+    node_id: [65]u8
+    audience: [513]u8
+    signing_key: [65]u8
+    encryption_key: [2369]u8
+    issued_at: s64
+    not_before: s64
+    expires_at: s64
+    nonce: [33]u8
+    bot_id: s64
+    telegram_id: s64
+    scope_count: s32
+    scopes: [16]ScopeStorage
+    signature: [4841]u8
+}
+RequestedScope :: struct {
+    collection: string
+    read: bool
+    write: bool
+}
+SessionChallenge :: struct {
+    grant_id: [33]u8
+    challenge: [33]u8
+    node_id: [65]u8
+    audience: [513]u8
+    expires_at: s64
+}
+DelegateSession :: struct {
+    session_id: [33]u8
+    grant_id: [33]u8
+    challenge: [33]u8
+    expires_at: s64
+}
+OwnerRendezvous :: struct {
+    request_id: [33]u8
+    grant_id: [33]u8
+    account_id: [65]u8
+    app_id: [65]u8
+    node_id: [65]u8
+    audience: [513]u8
+    expires_at: s64
+    bot_id: s64
+    telegram_id: s64
+    client_id: [65]u8
+    signing_key: [65]u8
+    encryption_key: [2369]u8
+    challenge: [33]u8
+    status: [17]u8
+    scope_count: s32
+    scopes: [16]ScopeStorage
+}
+
+PublicRendezvous :: struct {
+    request_id: [33]u8
+    grant_id: [33]u8
+    app_id: [65]u8
+    node_id: [65]u8
+    audience: [513]u8
+    expires_at: s64
+    challenge: [33]u8
+    status: [17]u8
+}
+
+#scope_export
+LowerHex :: (value: string, size: s64) -> bool {
+    if value.count != size {
+        return false
+    }
+    for byte: value {
+        if !((byte >= cast(u8)48 && byte <= cast(u8)57) ||
+            (byte >= cast(u8)97 && byte <= cast(u8)102)) {
+            return false
+        }
+    }
+    return true
+}
+LineText :: (value: string, limit: s64) -> bool {
+    if value.count == 0 || value.count > limit {
+        return false
+    }
+    for byte: value {
+        if byte < cast(u8)33 || byte >= cast(u8)127 {
+            return false
+        }
+    }
+    return true
+}
+Identifier :: (value: string, minimum: s64, maximum: s64) -> bool {
+    if value.count < minimum || value.count > maximum {
+        return false
+    }
+    for byte: value {
+        if !((byte >= cast(u8)97 && byte <= cast(u8)122) ||
+            (byte >= cast(u8)65 && byte <= cast(u8)90) ||
+            (byte >= cast(u8)48 && byte <= cast(u8)57) ||
+            byte == cast(u8)46 || byte == cast(u8)58 ||
+            byte == cast(u8)45 || byte == cast(u8)95) {
+            return false
+        }
+    }
+    return true
+}
+Namespace :: (value: string) -> bool {
+    return Identifier(value, 1, 64)
+}
+Collection :: (value: string) -> bool {
+    if value.count < 9 || value.count > 64 ||
+        value[0:8] == "account." ||
+        (value.count >= 16 && value[0:16] == "private.inbe.v1.") {
+        return false
+    }
+    component: s32 = 0
+    start: s64 = 0
+    cursor: s64 = 0
+    while cursor <= cast(s64)value.count {
+        if cursor == cast(s64)value.count || value[cursor] == cast(u8)46 {
+            segment := value[start:cursor]
+            if !Identifier(segment, 1, 64) {
+                return false
+            }
+            if component == 0 && segment != "private" && segment != "shared" &&
+                segment != "friends" && segment != "public" {
+                return false
+            }
+            if component == 2 {
+                if segment.count < 2 || segment.count > 5 || segment[0] != cast(u8)118 ||
+                    segment[1] < cast(u8)49 || segment[1] > cast(u8)57 {
+                    return false
+                }
+                for index: 2..cast(s32)segment.count - 1 {
+                    if segment[index] < cast(u8)48 || segment[index] > cast(u8)57 {
+                        return false
+                    }
+                }
+            }
+            component += 1
+            start = cursor + 1
+        }
+        cursor += 1
+    }
+    return component >= 4
+}
+CompareText :: (left: string, right: string) -> s32 {
+    index: s64 = 0
+    while index < cast(s64)left.count && index < cast(s64)right.count {
+        if left[index] < right[index] {
+            return -1
+        }
+        if left[index] > right[index] {
+            return 1
+        }
+        index += 1
+    }
+    if left.count == right.count {
+        return 0
+    }
+    return ifx left.count < right.count then -1 else 1
+}
+#scope_export
+GrantValid :: (grant: Grant, now: s64) -> bool {
+    if grant.version != 1 || !LowerHex(grant.account_id, 64) ||
+        !LowerHex(grant.grant_id, 32) || !LowerHex(grant.request_id, 32) ||
+        !Namespace(grant.app_id) || !LowerHex(grant.client_id, 64) ||
+        !LowerHex(grant.node_id, 64) || !LineText(grant.audience, 512) ||
+        !LowerHex(grant.signing_key, 64) || !LowerHex(grant.encryption_key, 2368) ||
+        !LowerHex(grant.nonce, 32) || grant.issued_at <= 0 ||
+        grant.issued_at > now || grant.not_before < grant.issued_at ||
+        grant.not_before > now || grant.expires_at <= now ||
+        grant.expires_at - grant.issued_at > 2592000 ||
+        grant.scopes.count < 1 || grant.scopes.count > 16 ||
+        grant.bot_id < 0 || grant.telegram_id < 0 ||
+        grant.bot_id > 9007199254740991 || grant.telegram_id > 4503599627370495 ||
+        ((grant.bot_id == 0) != (grant.telegram_id == 0)) {
+        return false
+    }
+    previous: string = ""
+    for scope: grant.scopes {
+        if !Collection(scope.collection) || CompareText(scope.collection, previous) <= 0 ||
+            (!scope.read && !scope.write) ||
+            (scope.visibility != "private" && scope.visibility != "shared" &&
+                scope.visibility != "friends" && scope.visibility != "public") ||
+            !Identifier(scope.key_id, 8, 128) || scope.key_envelope.count < 1 ||
+            scope.key_envelope.count > 16384 {
+            return false
+        }
+        previous = scope.collection
+    }
+    return true
+}
+#scope_export
+ViewGrant :: (storage: *GrantStorage, scopes: []GrantScope, grant: *Grant) -> bool {
+    if grant == null {
+        return false
+    }
+    grant.* = Grant.{}
+    if storage == null || storage.scope_count < 1 || storage.scope_count > 16 ||
+        scopes.count < storage.scope_count {
+        return false
+    }
+    grant.version = storage.version
+    grant.account_id = TextUntilNul(storage.account_id[:])
+    grant.grant_id = TextUntilNul(storage.grant_id[:])
+    grant.request_id = TextUntilNul(storage.request_id[:])
+    grant.app_id = TextUntilNul(storage.app_id[:])
+    grant.client_id = TextUntilNul(storage.client_id[:])
+    grant.node_id = TextUntilNul(storage.node_id[:])
+    grant.audience = TextUntilNul(storage.audience[:])
+    grant.signing_key = TextUntilNul(storage.signing_key[:])
+    grant.encryption_key = TextUntilNul(storage.encryption_key[:])
+    grant.issued_at = storage.issued_at
+    grant.not_before = storage.not_before
+    grant.expires_at = storage.expires_at
+    grant.nonce = TextUntilNul(storage.nonce[:])
+    grant.bot_id = storage.bot_id
+    grant.telegram_id = storage.telegram_id
+    grant.signature = TextUntilNul(storage.signature[:])
+    for index: 0..storage.scope_count - 1 {
+        source := *storage.scopes[index]
+        scopes[index].collection = TextUntilNul(source.collection[:])
+        scopes[index].visibility = TextUntilNul(source.visibility[:])
+        scopes[index].read = source.read
+        scopes[index].write = source.write
+        scopes[index].key_id = TextUntilNul(source.key_id[:])
+        scopes[index].key_envelope = TextUntilNul(source.key_envelope[:])
+    }
+    grant.scopes = scopes[0:storage.scope_count]
+    return true
+}
+Line :: (writer: Writer, value: string) -> Writer {
+    return WriteByte(WriteText(writer, value), cast(u8)10)
+}
+NumberLine :: (writer: Writer, value: s64) -> Writer {
+    return WriteByte(WriteDecimal(writer, value), cast(u8)10)
+}
+#scope_export
+BuildGrantMessage :: (grant: Grant, output: []u8) -> bool {
+    if output.count < 1 {
+        return false
+    }
+    output[0] = 0
+    if !GrantValid(grant, grant.not_before) {
+        return false
+    }
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "daochi-authorization-v1\n1\n")
+    writer = Line(writer, grant.account_id)
+    writer = Line(writer, grant.grant_id)
+    writer = Line(writer, grant.request_id)
+    writer = Line(writer, grant.app_id)
+    writer = Line(writer, grant.client_id)
+    writer = Line(writer, grant.node_id)
+    writer = Line(writer, grant.audience)
+    writer = Line(writer, grant.signing_key)
+    writer = Line(writer, grant.encryption_key)
+    writer = NumberLine(writer, grant.issued_at)
+    writer = NumberLine(writer, grant.not_before)
+    writer = NumberLine(writer, grant.expires_at)
+    writer = Line(writer, grant.nonce)
+    writer = NumberLine(writer, grant.bot_id)
+    writer = NumberLine(writer, grant.telegram_id)
+    writer = NumberLine(writer, cast(s64)grant.scopes.count)
+    for scope: grant.scopes {
+        digest: [65]u8
+        if !HashText(scope.key_envelope, digest[:]) {
+            return false
+        }
+        writer = Line(writer, scope.collection)
+        writer = Line(writer, scope.visibility)
+        writer = Line(writer, ifx scope.read then "read" else "")
+        writer = Line(writer, ifx scope.write then "write" else "")
+        writer = Line(writer, scope.key_id)
+        writer = Line(writer, TextUntilNul(digest[:]))
+    }
+    return writer.valid
+}
+JsonTextField :: (writer: Writer, name: string, value: string) -> Writer {
+    result := AppendJsonQuoted(writer, name)
+    result = WriteByte(result, cast(u8)58)
+    return AppendJsonQuoted(result, value)
+}
+JsonNumberField :: (writer: Writer, name: string, value: s64) -> Writer {
+    result := AppendJsonQuoted(writer, name)
+    result = WriteByte(result, cast(u8)58)
+    return WriteDecimal(result, value)
+}
+#scope_export
+BuildGrantBody :: (grant: Grant, output: []u8) -> bool {
+    if output.count < 1 || !GrantValid(grant, grant.not_before) ||
+        !LowerHex(grant.signature, 4840) {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "{\"version\":1,")
+    writer = JsonTextField(writer, "account_id", grant.account_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "grant_id", grant.grant_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "request_id", grant.request_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "app_id", grant.app_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "client_id", grant.client_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "node_id", grant.node_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "audience", grant.audience)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "signing_key", grant.signing_key)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "encryption_key", grant.encryption_key)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "issued_at", grant.issued_at)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "not_before", grant.not_before)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "expires_at", grant.expires_at)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "nonce", grant.nonce)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "bot_id", grant.bot_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "telegram_id", grant.telegram_id)
+    writer = WriteText(writer, ",\"scopes\":[")
+    index: s32 = 0
+    for scope: grant.scopes {
+        if index > 0 {
+            writer = WriteByte(writer, cast(u8)44)
+        }
+        writer = WriteByte(writer, cast(u8)123)
+        writer = JsonTextField(writer, "collection", scope.collection)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "visibility", scope.visibility)
+        writer = WriteText(writer, ",\"read\":")
+        writer = WriteText(writer, ifx scope.read then "true" else "false")
+        writer = WriteText(writer, ",\"write\":")
+        writer = WriteText(writer, ifx scope.write then "true" else "false")
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "key_id", scope.key_id)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "key_envelope", scope.key_envelope)
+        writer = WriteByte(writer, cast(u8)125)
+        index += 1
+    }
+    writer = WriteText(writer, "],")
+    writer = JsonTextField(writer, "signature", grant.signature)
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+// Known, unique decoded member names. Escaped aliases cannot bypass duplicates.
+#scope_export
+ObjectFields :: (json: string, at: s32, names: []string, positions: []s32) -> bool {
+    return ObjectFieldsMinimum(json, at, names, positions, cast(s32)names.count)
+}
+#scope_export
+ObjectFieldsMinimum :: (json: string, at: s32, names: []string,
+    positions: []s32, required: s32) -> bool {
+    if positions.count < names.count || names.count > 32 || required < 0 || required > names.count {
+        return false
+    }
+    for index: 0..cast(s32)names.count - 1 {
+        positions[index] = -1
+    }
+    cursor := Space(json, at)
+    if cursor < 0 || cursor >= cast(s32)json.count || json[cursor] != cast(u8)123 {
+        return false
+    }
+    cursor = Space(json, cursor + 1)
+    while cursor < cast(s32)json.count && json[cursor] != cast(u8)125 {
+        key: [129]u8
+        span := ReadString(json, cursor)
+        if !span.valid || ReadStringText(json, cursor, key[:]) < 0 {
+            return false
+        }
+        selected: s32 = -1
+        for index: 0..cast(s32)names.count - 1 {
+            if TextUntilNul(key[:]) == names[index] {
+                selected = index
+            }
+        }
+        if selected < 0 || positions[selected] >= 0 {
+            return false
+        }
+        cursor = Space(json, span.after)
+        if cursor >= cast(s32)json.count || json[cursor] != cast(u8)58 {
+            return false
+        }
+        cursor = Space(json, cursor + 1)
+        positions[selected] = cursor
+        cursor = ValueEnd(json, cursor, 0)
+        if cursor < 0 {
+            return false
+        }
+        cursor = Space(json, cursor)
+        if cursor >= cast(s32)json.count {
+            return false
+        }
+        if json[cursor] == cast(u8)125 {
+            break
+        }
+        if json[cursor] != cast(u8)44 {
+            return false
+        }
+        cursor = Space(json, cursor + 1)
+        if cursor >= cast(s32)json.count || json[cursor] == cast(u8)125 {
+            return false
+        }
+    }
+    for index: 0..required - 1 {
+        if positions[index] < 0 {
+            return false
+        }
+    }
+    return cursor < cast(s32)json.count && json[cursor] == cast(u8)125
+}
+#scope_export
+WholeJson :: (json: string) -> bool {
+    if json.count == 0 || json.count > 1048576 {
+        return false
+    }
+    end := ValueEnd(json, 0, 0)
+    return end > 0 && Space(json, end) == cast(s32)json.count
+}
+#scope_export
+ReadInteger :: (json: string, at: s32, output: *s64) -> bool {
+    if output == null || at < 0 {
+        return false
+    }
+    finish := ValueEnd(json, at, 0)
+    if finish <= at || json[at] < cast(u8)48 || json[at] > cast(u8)57 {
+        return false
+    }
+    value: s64 = 0
+    for index: at..finish - 1 {
+        byte := json[index]
+        if byte < cast(u8)48 || byte > cast(u8)57 ||
+            value > (9007199254740991 - cast(s64)(byte - cast(u8)48)) / 10 {
+            return false
+        }
+        value = value * 10 + cast(s64)(byte - cast(u8)48)
+    }
+    output.* = value
+    return true
+}
+ReadBool :: (json: string, at: s32, output: *bool) -> bool {
+    if at < 0 || output == null {
+        return false
+    }
+    finish := ValueEnd(json, at, 0)
+    if finish < at {
+        return false
+    }
+    value := json[at:finish]
+    if value != "true" && value != "false" {
+        return false
+    }
+    output.* = value == "true"
+    return true
+}
+#scope_export
+ReadGrantAt :: (json: string, at: s32, storage: *GrantStorage) -> bool {
+    if storage == null {
+        return false
+    }
+    storage.* = GrantStorage.{}
+    names: [18]string = .["version", "account_id", "grant_id", "request_id",
+        "app_id", "client_id", "node_id", "audience", "signing_key", "encryption_key",
+        "issued_at", "not_before", "expires_at", "nonce", "bot_id", "telegram_id",
+        "scopes", "signature"]
+    positions: [18]s32
+    version: s64
+    if !ObjectFields(json, at, names[:], positions[:]) ||
+        !ReadInteger(json, positions[0], *version) || version != 1 ||
+        ReadStringText(json, positions[1], storage.account_id[:]) < 0 ||
+        ReadStringText(json, positions[2], storage.grant_id[:]) < 0 ||
+        ReadStringText(json, positions[3], storage.request_id[:]) < 0 ||
+        ReadStringText(json, positions[4], storage.app_id[:]) < 0 ||
+        ReadStringText(json, positions[5], storage.client_id[:]) < 0 ||
+        ReadStringText(json, positions[6], storage.node_id[:]) < 0 ||
+        ReadStringText(json, positions[7], storage.audience[:]) < 0 ||
+        ReadStringText(json, positions[8], storage.signing_key[:]) < 0 ||
+        ReadStringText(json, positions[9], storage.encryption_key[:]) < 0 ||
+        !ReadInteger(json, positions[10], *storage.issued_at) ||
+        !ReadInteger(json, positions[11], *storage.not_before) ||
+        !ReadInteger(json, positions[12], *storage.expires_at) ||
+        ReadStringText(json, positions[13], storage.nonce[:]) < 0 ||
+        !ReadInteger(json, positions[14], *storage.bot_id) ||
+        !ReadInteger(json, positions[15], *storage.telegram_id) ||
+        ReadStringText(json, positions[17], storage.signature[:]) < 0 {
+        return false
+    }
+    storage.version = 1
+    scope_positions: [16]s32
+    count := ArrayPositions(json, positions[16], scope_positions[:])
+    if count < 1 || count > 16 {
+        return false
+    }
+    scope_names: [6]string = .["collection", "visibility", "read", "write", "key_id", "key_envelope"]
+    for index: 0..count - 1 {
+        fields: [6]s32
+        scope := *storage.scopes[index]
+        if !ObjectFields(json, scope_positions[index], scope_names[:], fields[:]) ||
+            ReadStringText(json, fields[0], scope.collection[:]) < 0 ||
+            ReadStringText(json, fields[1], scope.visibility[:]) < 0 ||
+            !ReadBool(json, fields[2], *scope.read) || !ReadBool(json, fields[3], *scope.write) ||
+            ReadStringText(json, fields[4], scope.key_id[:]) < 0 ||
+            ReadStringText(json, fields[5], scope.key_envelope[:]) < 0 {
+            return false
+        }
+    }
+    storage.scope_count = count
+    return true
+}
+#scope_export
+VerifyGrantSignature :: (grant: Grant, owner_public_key: string, now: s64) -> bool {
+    if !GrantValid(grant, now) || !LowerHex(owner_public_key, 2624) ||
+        !LowerHex(grant.signature, 4840) {
+        return false
+    }
+    public_key: [1312]u8
+    signature: [2420]u8
+    identity: [65]u8
+    message: [8192]u8
+    if HexToBytes(owner_public_key, *public_key[0], 1312) == 0 ||
+        HexToBytes(grant.signature, *signature[0], 2420) == 0 ||
+        !BuildGrantMessage(grant, message[:]) {
+        return false
+    }
+    Sha256Hex(*public_key[0], 1312, *identity[0])
+    if TextUntilNul(identity[:]) != grant.account_id {
+        return false
+    }
+    text := TextUntilNul(message[:])
+    descriptor: *TextDescriptor = cast(*TextDescriptor)(*text)
+    return MlDsa44Verify(BytesFromPointer(descriptor.data, cast(u64)text.count), signature[:], public_key[:])
+}
+#scope_export
+BuildAuthorizationRequest :: (app_id: string, telegram: bool,
+    scopes: []RequestedScope, output: []u8) -> bool {
+    if output.count < 1 || !Namespace(app_id) || scopes.count < 1 || scopes.count > 16 {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteByte(writer, cast(u8)123)
+    writer = JsonTextField(writer, "app_id", app_id)
+    writer = WriteText(writer, ",\"telegram\":")
+    writer = WriteText(writer, ifx telegram then "true" else "false")
+    writer = WriteText(writer, ",\"scopes\":[")
+    index: s32 = 0
+    previous: string = ""
+    for scope: scopes {
+        if !Collection(scope.collection) || CompareText(scope.collection, previous) <= 0 ||
+            (!scope.read && !scope.write) {
+            return false
+        }
+        if index > 0 {
+            writer = WriteByte(writer, cast(u8)44)
+        }
+        writer = WriteByte(writer, cast(u8)123)
+        writer = JsonTextField(writer, "collection", scope.collection)
+        writer = WriteText(writer, ",\"read\":")
+        writer = WriteText(writer, ifx scope.read then "true" else "false")
+        writer = WriteText(writer, ",\"write\":")
+        writer = WriteText(writer, ifx scope.write then "true" else "false")
+        writer = WriteByte(writer, cast(u8)125)
+        previous = scope.collection
+        index += 1
+    }
+    writer = WriteText(writer, "]}")
+    return writer.valid
+}
+#scope_export
+BuildIDBody :: (name: string, identifier: string, app_id: string, output: []u8) -> bool {
+    if output.count < 1 || (name != "request_id" && name != "grant_id") ||
+        !LowerHex(identifier, 32) || (app_id != "" && !Namespace(app_id)) {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteByte(writer, cast(u8)123)
+    writer = JsonTextField(writer, name, identifier)
+    if app_id != "" {
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "app_id", app_id)
+    }
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+
+#scope_export
+HashText :: (value: string, output: []u8) -> bool {
+    if output.count < 65 || value.count > 9223372036854775807 {
+        return false
+    }
+    descriptor: *TextDescriptor = cast(*TextDescriptor)(*value)
+    Sha256Hex(descriptor.data, cast(s64)value.count, *output[0])
+    return true
+}
+#scope_export
+ReadChallenge :: (json: string, output: *SessionChallenge) -> bool {
+    if output == null || !WholeJson(json) {
+        return false
+    }
+    output.* = SessionChallenge.{}
+    names: [5]string = .["grant_id", "challenge", "node_id", "audience", "expires_at"]
+    positions: [5]s32
+    return ObjectFields(json, 0, names[:], positions[:]) &&
+        ReadStringText(json, positions[0], output.grant_id[:]) >= 0 &&
+        ReadStringText(json, positions[1], output.challenge[:]) >= 0 &&
+        ReadStringText(json, positions[2], output.node_id[:]) >= 0 &&
+        ReadStringText(json, positions[3], output.audience[:]) >= 0 &&
+        ReadInteger(json, positions[4], *output.expires_at)
+}
+#scope_export
+ReadCredentialAt :: (json: string, at: s32, output: *DelegateSession) -> bool {
+    if output == null {
+        return false
+    }
+    output.* = DelegateSession.{}
+    names: [4]string = .["session_id", "grant_id", "challenge", "expires_at"]
+    positions: [4]s32
+    return ObjectFields(json, at, names[:], positions[:]) &&
+        ReadStringText(json, positions[0], output.session_id[:]) >= 0 &&
+        ReadStringText(json, positions[1], output.grant_id[:]) >= 0 &&
+        ReadStringText(json, positions[2], output.challenge[:]) >= 0 &&
+        ReadInteger(json, positions[3], *output.expires_at)
+}
+#scope_export
+ReadOwnerRendezvous :: (json: string, output: *OwnerRendezvous) -> bool {
+    if output == null || !WholeJson(json) {
+        return false
+    }
+    output.* = OwnerRendezvous.{}
+    names: [15]string = .["request_id", "grant_id", "account_id", "app_id", "node_id",
+        "audience", "expires_at", "bot_id", "telegram_id", "client_id", "signing_key",
+        "encryption_key", "challenge", "status", "scopes"]
+    positions: [15]s32
+    if !ObjectFields(json, 0, names[:], positions[:]) ||
+        ReadStringText(json, positions[0], output.request_id[:]) < 0 ||
+        ReadStringText(json, positions[1], output.grant_id[:]) < 0 ||
+        ReadStringText(json, positions[2], output.account_id[:]) < 0 ||
+        ReadStringText(json, positions[3], output.app_id[:]) < 0 ||
+        ReadStringText(json, positions[4], output.node_id[:]) < 0 ||
+        ReadStringText(json, positions[5], output.audience[:]) < 0 ||
+        !ReadInteger(json, positions[6], *output.expires_at) ||
+        !ReadInteger(json, positions[7], *output.bot_id) ||
+        !ReadInteger(json, positions[8], *output.telegram_id) ||
+        ReadStringText(json, positions[9], output.client_id[:]) < 0 ||
+        ReadStringText(json, positions[10], output.signing_key[:]) < 0 ||
+        ReadStringText(json, positions[11], output.encryption_key[:]) < 0 ||
+        ReadStringText(json, positions[12], output.challenge[:]) < 0 ||
+        ReadStringText(json, positions[13], output.status[:]) < 0 {
+        return false
+    }
+    scope_positions: [16]s32
+    count := ArrayPositions(json, positions[14], scope_positions[:])
+    if count < 1 || count > 16 {
+        return false
+    }
+    scope_names: [3]string = .["collection", "read", "write"]
+    for index: 0..count - 1 {
+        fields: [3]s32
+        scope := *output.scopes[index]
+        if !ObjectFields(json, scope_positions[index], scope_names[:], fields[:]) ||
+            ReadStringText(json, fields[0], scope.collection[:]) < 0 ||
+            !ReadBool(json, fields[1], *scope.read) || !ReadBool(json, fields[2], *scope.write) {
+            return false
+        }
+    }
+    output.scope_count = count
+    return LowerHex(TextUntilNul(output.request_id[:]), 32) &&
+        LowerHex(TextUntilNul(output.account_id[:]), 64) &&
+        Namespace(TextUntilNul(output.app_id[:])) &&
+        LowerHex(TextUntilNul(output.node_id[:]), 64) &&
+        LowerHex(TextUntilNul(output.challenge[:]), 32) &&
+        LineText(TextUntilNul(output.audience[:]), 512)
+}
+#scope_export
+BuildClaimMessage :: (pending: *PublicRendezvous, client_id: string, signing_key: string,
+    encryption_key: string, init_digest: string, output: []u8) -> bool {
+    if pending == null || output.count == 0 || !LowerHex(client_id, 64) ||
+        !LowerHex(signing_key, 64) || !LowerHex(encryption_key, 2368) ||
+        (init_digest != "" && !LowerHex(init_digest, 64)) ||
+        !LowerHex(TextUntilNul(pending.request_id[:]), 32) ||
+        !Namespace(TextUntilNul(pending.app_id[:])) ||
+        !LowerHex(TextUntilNul(pending.node_id[:]), 64) ||
+        !LineText(TextUntilNul(pending.audience[:]), 512) ||
+        !LowerHex(TextUntilNul(pending.challenge[:]), 32) ||
+        pending.expires_at <= 0 {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "daochi-rendezvous-claim-v1\n")
+    writer = Line(writer, TextUntilNul(pending.request_id[:]))
+    writer = Line(writer, TextUntilNul(pending.app_id[:]))
+    writer = Line(writer, TextUntilNul(pending.node_id[:]))
+    writer = Line(writer, TextUntilNul(pending.audience[:]))
+    writer = Line(writer, TextUntilNul(pending.challenge[:]))
+    writer = NumberLine(writer, pending.expires_at)
+    writer = Line(writer, client_id)
+    writer = Line(writer, signing_key)
+    writer = Line(writer, encryption_key)
+    writer = Line(writer, init_digest)
+    return writer.valid
+}
+#scope_export
+BuildClaimBody :: (request_id: string, client_id: string, signing_key: string,
+    encryption_key: string, raw_init_data: string, proof: string, output: []u8) -> bool {
+    if output.count == 0 || !LowerHex(request_id, 32) || !LowerHex(client_id, 64) ||
+        !LowerHex(signing_key, 64) || !LowerHex(encryption_key, 2368) ||
+        !LowerHex(proof, 128) || raw_init_data.count > 16384 {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteByte(writer, cast(u8)123)
+    writer = JsonTextField(writer, "request_id", request_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "client_id", client_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "signing_key", signing_key)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "encryption_key", encryption_key)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "init_data", raw_init_data)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "proof", proof)
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+
+#scope_export
+ReadPublicRendezvous :: (json: string, output: *PublicRendezvous) -> bool {
+    if output == null || !WholeJson(json) {
+        return false
+    }
+    output.* = PublicRendezvous.{}
+    names: [8]string = .["request_id", "grant_id", "app_id", "node_id", "audience",
+        "expires_at", "challenge", "status"]
+    positions: [8]s32
+    if !ObjectFields(json, 0, names[:], positions[:]) ||
+        ReadStringText(json, positions[0], output.request_id[:]) < 0 ||
+        ReadStringText(json, positions[1], output.grant_id[:]) < 0 ||
+        ReadStringText(json, positions[2], output.app_id[:]) < 0 ||
+        ReadStringText(json, positions[3], output.node_id[:]) < 0 ||
+        ReadStringText(json, positions[4], output.audience[:]) < 0 ||
+        !ReadInteger(json, positions[5], *output.expires_at) ||
+        ReadStringText(json, positions[6], output.challenge[:]) < 0 ||
+        ReadStringText(json, positions[7], output.status[:]) < 0 {
+        return false
+    }
+    grant_id := TextUntilNul(output.grant_id[:])
+    return LowerHex(TextUntilNul(output.request_id[:]), 32) &&
+        (grant_id == "" || LowerHex(grant_id, 32)) &&
+        Namespace(TextUntilNul(output.app_id[:])) &&
+        LowerHex(TextUntilNul(output.node_id[:]), 64) &&
+        LineText(TextUntilNul(output.audience[:]), 512) &&
+        LowerHex(TextUntilNul(output.challenge[:]), 32)
+}
