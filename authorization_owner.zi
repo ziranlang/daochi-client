@@ -12,7 +12,8 @@
 OwnerAuthorizationRoute :: (path: string) -> bool {
     return path == "/api/v1/authorization/requests" ||
         path == "/api/v1/authorization/cancel" ||
-        path == "/api/v1/authorization/revoke"
+        path == "/api/v1/authorization/revoke" ||
+        path == "/api/v1/telegram/account/bind"
 }
 BuildOwnerMessage :: (transaction: SyncTransaction, path: string, output: []u8) -> bool {
     if !OwnerAuthorizationRoute(path) || !TransactionValid(transaction) || output.count == 0 {

@@ -492,6 +492,9 @@ static void check_transports(void)
     assert(pending.result == AuthResult_AUTH_REQUEST_FAILED && !active);
     assert(!authorization_owner_OwnerAuthorizationRoute(StringLiteral("/api/v1/account/delete")));
     assert(authorization_owner_OwnerAuthorizationRoute(StringLiteral("/api/v1/authorization/revoke")));
+    assert(authorization_owner_OwnerAuthorizationRoute(StringLiteral("/api/v1/telegram/account/bind")));
+    assert(!authorization_owner_OwnerAuthorizationRoute(StringLiteral("/api/v1/telegram/account/bind/extra")));
+    assert(!delegated_RequestRoute(StringLiteral("POST"), StringLiteral("/api/v1/telegram/account/bind"), StringLiteral("")));
 }
 
 static void reset_timing(void)
