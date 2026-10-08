@@ -3,7 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
-unset DISPLAY WAYLAND_DISPLAY
+unset DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
 launcher=${ZIRAN_BIN:-ziran}
 if [ -f ziran.local.toml ]; then
     ziran=${ZIRAN_DIR:-"$("$launcher" pkg path ziran)"}
@@ -56,7 +56,7 @@ echo 'Daochi Ziran asynchronous request and signed sync passed'
 # the algorithms exposed by the Oqs package.
 liboqs_build="$root/build/liboqs"
 liboqs=${LIBOQS_A:-"$liboqs_build/lib/liboqs.a"}
-if [ ! -f "$liboqs" ]; then
+if [ ! -f "$liboqs" ] || ! nm "$liboqs" | rg -q OQS_KEM_ml_kem_768_keypair; then
     cmake -S "$("$ziran_bin" pkg path liboqs)" -B "$liboqs_build" \
         -DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_SHARED_LIBS=OFF \
         -DOQS_BUILD_ONLY_LIB=ON -DOQS_USE_OPENSSL=OFF -DOQS_DIST_BUILD=OFF \
@@ -75,6 +75,20 @@ fi
     "$liboqs" -o "$work/keys_test"
 env -u DISPLAY -u WAYLAND_DISPLAY "$work/keys_test"
 echo 'Daochi account keys, key files, and cryptography passed'
+
+# Shared canonical server fixture and actual recipient-bound key envelopes.
+"$compiler" --no-main --root "$root" --module-path "$ziran/std" \
+    --module-path "oqs=$oqs/src" -o "$work/authorization" \
+    "$root/authorization.zi" "$root/authorization_owner.zi" \
+    "$root/delegated.zi" "$root/async_delegated.zi" "$root/envelope.zi"
+"${CC:-cc}" -std=c11 -O0 -Wall -Wextra -Werror \
+    -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter \
+    -ffunction-sections -fdata-sections -Wl,--gc-sections \
+    -I"$ziran/include" -I"$work/authorization" \
+    "$root/tests/authorization_test.c" "$work/authorization"/*.c \
+    "$liboqs" -o "$work/authorization_test"
+env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS \
+    "$work/authorization_test" "$root/tests/fixtures/authorization_v1.json"
 
 "$ziran_bin" bundle --root "$root/tests" \
     --module-path "$root" --module-path "$ziran/std" \

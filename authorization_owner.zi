@@ -1,0 +1,153 @@
+// Owner operations retain protocol v6 ML-DSA and registered-device signatures.
+#import "authorization"
+#import "sync"
+#import "transaction"
+#import "client"
+#import "auth"
+#import "wire"
+#import "text_buffer"
+#import "net_http"
+
+#scope_export
+OwnerAuthorizationRoute :: (path: string) -> bool {
+    return path == "/api/v1/authorization/requests" ||
+        path == "/api/v1/authorization/cancel" ||
+        path == "/api/v1/authorization/revoke"
+}
+BuildOwnerMessage :: (transaction: SyncTransaction, path: string, output: []u8) -> bool {
+    if !OwnerAuthorizationRoute(path) || !TransactionValid(transaction) || output.count == 0 {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "daochi-tx-v1\n6\n")
+    writer = Line(writer, transaction.tx_id)
+    writer = Line(writer, transaction.account_id)
+    writer = Line(writer, transaction.app_id)
+    writer = Line(writer, transaction.device_key_id)
+    writer = WriteText(writer, "POST\n")
+    writer = Line(writer, path)
+    writer = Line(writer, transaction.body_sha256_hex)
+    writer = Line(writer, transaction.nonce)
+    writer = NumberLine(writer, transaction.expires_at)
+    return writer.valid
+}
+BuildOwnerHeader :: (transaction: SyncTransaction, path: string,
+    account_signature: string, device_signature: string, output: []u8) -> bool {
+    if !OwnerAuthorizationRoute(path) || !TransactionValid(transaction) || output.count == 0 ||
+        !LowerHex(account_signature, 4840) || !LowerHex(device_signature, 128) {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "{\"protocol_version\":6,")
+    writer = JsonTextField(writer, "tx_id", transaction.tx_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "account_id", transaction.account_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "app_id", transaction.app_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "device_key_id", transaction.device_key_id)
+    writer = WriteText(writer, ",\"method\":\"POST\",")
+    writer = JsonTextField(writer, "path", path)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "body_sha256", transaction.body_sha256_hex)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "nonce", transaction.nonce)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "expires_at", transaction.expires_at)
+    writer = WriteText(writer, ",\"signature_context\":\"daochi-tx-v1\",")
+    writer = JsonTextField(writer, "signature", account_signature)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "device_signature", device_signature)
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+PrepareOwnerAuthorizationHeader :: (client: Client, session: *Session, device: Device,
+    now: s64, random_context: *void, random: RandomNonce,
+    path: string, body: string, output: []u8) -> AuthResult {
+    if !OwnerAuthorizationRoute(path) || body.count == 0 || session == null ||
+        client.digest == null || client.signer == null || device.signer == null ||
+        !Hex64(device.key_id) {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    tx_id: [65]u8
+    nonce: [65]u8
+    hash: [65]u8
+    if !CreateNonce(random_context, random, tx_id[:]) ||
+        !CreateNonce(random_context, random, nonce[:]) ||
+        !client.digest(body, hash[:]) || !Hex64(TextUntilNul(hash[:])) {
+        return cast(AuthResult)AuthResult.AUTH_SIGN_FAILED
+    }
+    server_now := ServerNow(session, now)
+    if server_now <= 0 || server_now > 9007199254740691 {
+        return cast(AuthResult)AuthResult.AUTH_SIGN_FAILED
+    }
+    transaction: SyncTransaction
+    transaction.account_id = client.identity.account_id
+    transaction.app_id = client.app_id
+    transaction.device_key_id = device.key_id
+    transaction.tx_id = TextUntilNul(tx_id[:])
+    transaction.nonce = TextUntilNul(nonce[:])
+    transaction.body_sha256_hex = TextUntilNul(hash[:])
+    transaction.expires_at = server_now + 300
+    message: [2048]u8
+    owner_signature: [4841]u8
+    device_signature: [129]u8
+    if !BuildOwnerMessage(transaction, path, message[:]) ||
+        !client.signer(client.identity.signing_context, TextUntilNul(message[:]), owner_signature[:]) ||
+        !device.signer(device.signing_context, TextUntilNul(message[:]), device_signature[:]) ||
+        !BuildOwnerHeader(transaction, path, TextUntilNul(owner_signature[:]),
+            TextUntilNul(device_signature[:]), output) {
+        return cast(AuthResult)AuthResult.AUTH_SIGN_FAILED
+    }
+    return cast(AuthResult)AuthResult.AUTH_OK
+}
+OwnerAuthorizationRequest :: (client: Client, session: *Session, device: Device,
+    now: s64, random_context: *void, random: RandomNonce, path: string,
+    body: string, output: []u8, status: *s32) -> AuthResult {
+    if !OwnerAuthorizationRoute(path) {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    ready := EnsureSession(client, session, now)
+    if ready != cast(AuthResult)AuthResult.AUTH_OK {
+        return ready
+    }
+    registered := RegisterDevice(client, session, device, now, random_context, random)
+    if registered != cast(AuthResult)AuthResult.AUTH_OK {
+        return registered
+    }
+    header: [8192]u8
+    prepared := PrepareOwnerAuthorizationHeader(client, session, device, now,
+        random_context, random, path, body, header[:])
+    if prepared != cast(AuthResult)AuthResult.AUTH_OK {
+        return prepared
+    }
+    extra: [1]HttpHeader
+    extra[0].name = "X-Daochi-Tx"
+    extra[0].value = TextUntilNul(header[:])
+    return BearerRequestWithHeaders(client, session, now, "POST", path, body,
+        output, status, extra[:])
+}
+
+// Approval signs the immutable grant once, rather than signing each mutation.
+#scope_export
+PrepareGrantApproval :: (client: Client, grant: Grant, output: []u8) -> AuthResult {
+    if client.signer == null || grant.account_id != client.identity.account_id ||
+        grant.app_id != client.app_id {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    message: [8192]u8
+    signature: [4841]u8
+    if !BuildGrantMessage(grant, message[:]) ||
+        !client.signer(client.identity.signing_context, TextUntilNul(message[:]), signature[:]) ||
+        !LowerHex(TextUntilNul(signature[:]), 4840) {
+        return cast(AuthResult)AuthResult.AUTH_SIGN_FAILED
+    }
+    signed := grant
+    signed.signature = TextUntilNul(signature[:])
+    if !BuildGrantBody(signed, output) {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    return cast(AuthResult)AuthResult.AUTH_OK
+}

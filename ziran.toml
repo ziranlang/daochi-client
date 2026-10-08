@@ -7,6 +7,11 @@ git = "https://github.com/ziranlang/ziran.git"
 ref = "master"
 
 [exports]
+authorization = "authorization.zi"
+authorization_owner = "authorization_owner.zi"
+delegated = "delegated.zi"
+async_delegated = "async_delegated.zi"
+envelope = "envelope.zi"
 account = "account.zi"
 async_account = "async_account.zi"
 async_client = "async_client.zi"

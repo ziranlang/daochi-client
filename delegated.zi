@@ -1,0 +1,613 @@
+// Key-bound session and scoped sync transports. Never populates HttpRequest.token.
+#import "authorization"
+#import "client"
+#import "auth"
+#import "wire"
+#import "url"
+#import "net_http"
+#import "text_buffer"
+#import "json_scan"
+
+RandomID :: #type (context: *void, output: []u8) -> bool #c_call;
+DelegateClient :: struct {
+    server_url: string
+    account_id: string
+    app_id: string
+    client_id: string
+    grant_id: string
+    node_id: string
+    audience: string
+    signing_key: string
+    encryption_key: string
+    scopes: []RequestedScope
+    grant: *GrantStorage
+    signing_context: *void
+    signer: SignMessage
+    random_context: *void
+    random: RandomID
+    transport_context: *void
+    send: SendRequest
+}
+RequestProof :: struct {
+    grant_id: string
+    session_id: string
+    account_id: string
+    app_id: string
+    client_id: string
+    node_id: string
+    audience: string
+    challenge: string
+    method: string
+    path: string
+    query: string
+    body_sha256: string
+    expires_at: s64
+    nonce: string
+}
+DelegatedRecord :: struct {
+    id: string
+    key_id: string
+    nonce: string
+    ciphertext: string
+    updated_at: string
+    content_hash: string
+    schema_version: s32
+    parent_id: string
+}
+#scope_export
+DelegateClientValid :: (client: DelegateClient) -> bool {
+    normalized: [513]u8
+    return LowerHex(client.account_id, 64) && Namespace(client.app_id) &&
+        LowerHex(client.client_id, 64) && LowerHex(client.grant_id, 32) &&
+        LowerHex(client.node_id, 64) && LowerHex(client.signing_key, 64) &&
+        LowerHex(client.encryption_key, 2368) && client.grant != null &&
+        client.scopes.count >= 1 && client.scopes.count <= 16 &&
+        client.signer != null && client.random != null &&
+        NormalizeUrl(client.server_url, normalized[:]) &&
+        TextUntilNul(normalized[:]) == client.audience
+}
+#scope_export
+SessionValid :: (client: DelegateClient, session: *DelegateSession, now: s64) -> bool {
+    return DelegateClientValid(client) && session != null &&
+        LowerHex(TextUntilNul(session.session_id[:]), 32) &&
+        TextUntilNul(session.grant_id[:]) == client.grant_id &&
+        LowerHex(TextUntilNul(session.challenge[:]), 32) &&
+        session.expires_at > now + 5 && client.grant.version == 1 &&
+        client.grant.expires_at > now
+}
+#scope_export
+ClearDelegateSession :: (session: *DelegateSession) {
+    if session != null {
+        session.* = DelegateSession.{}
+    }
+}
+#scope_export
+BuildSessionMessage :: (challenge: *SessionChallenge, output: []u8) -> bool {
+    if challenge == null || output.count == 0 ||
+        !LowerHex(TextUntilNul(challenge.grant_id[:]), 32) ||
+        !LowerHex(TextUntilNul(challenge.challenge[:]), 32) ||
+        !LowerHex(TextUntilNul(challenge.node_id[:]), 64) ||
+        !LineText(TextUntilNul(challenge.audience[:]), 512) || challenge.expires_at <= 0 {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "daochi-session-v1\n")
+    writer = Line(writer, TextUntilNul(challenge.grant_id[:]))
+    writer = Line(writer, TextUntilNul(challenge.challenge[:]))
+    writer = Line(writer, TextUntilNul(challenge.node_id[:]))
+    writer = Line(writer, TextUntilNul(challenge.audience[:]))
+    writer = NumberLine(writer, challenge.expires_at)
+    return writer.valid
+}
+#scope_export
+PrepareSessionBody :: (client: DelegateClient, challenge: *SessionChallenge,
+    now: s64, output: []u8) -> bool {
+    if !DelegateClientValid(client) || challenge == null || output.count == 0 ||
+        TextUntilNul(challenge.grant_id[:]) != client.grant_id ||
+        TextUntilNul(challenge.node_id[:]) != client.node_id ||
+        TextUntilNul(challenge.audience[:]) != client.audience ||
+        challenge.expires_at <= now || challenge.expires_at > now + 90 {
+        return false
+    }
+    message: [1024]u8
+    signature: [129]u8
+    if !BuildSessionMessage(challenge, message[:]) ||
+        !client.signer(client.signing_context, TextUntilNul(message[:]), signature[:]) ||
+        !LowerHex(TextUntilNul(signature[:]), 128) {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteByte(writer, cast(u8)123)
+    writer = JsonTextField(writer, "grant_id", client.grant_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "challenge", TextUntilNul(challenge.challenge[:]))
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "signature", TextUntilNul(signature[:]))
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+#scope_export
+AcceptSessionAnswer :: (client: DelegateClient, status: s32, json: string,
+    now: s64, session: *DelegateSession) -> AuthResult {
+    if session == null || !DelegateClientValid(client) {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    ClearDelegateSession(session)
+    if status != 200 {
+        if status == 401 || status == 403 {
+            return cast(AuthResult)AuthResult.AUTH_FAILED
+        }
+        return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
+    }
+    names: [3]string = .["credential", "grant", "owner_public_key"]
+    positions: [3]s32
+    owner_public: [2625]u8
+    candidate: GrantStorage
+    if !WholeJson(json) || !ObjectFields(json, 0, names[:], positions[:]) ||
+        !ReadCredentialAt(json, positions[0], session) ||
+        !ReadGrantAt(json, positions[1], *candidate) ||
+        ReadStringText(json, positions[2], owner_public[:]) < 0 {
+        ClearDelegateSession(session)
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    views: [16]GrantScope
+    grant: Grant
+    if !ViewGrant(*candidate, views[:], *grant) ||
+        !VerifyGrantSignature(grant, TextUntilNul(owner_public[:]), now) ||
+        grant.account_id != client.account_id || grant.app_id != client.app_id ||
+        grant.client_id != client.client_id || grant.grant_id != client.grant_id ||
+        grant.node_id != client.node_id || grant.audience != client.audience ||
+        grant.signing_key != client.signing_key || grant.encryption_key != client.encryption_key ||
+        grant.scopes.count != client.scopes.count ||
+        !LowerHex(TextUntilNul(session.session_id[:]), 32) ||
+        TextUntilNul(session.grant_id[:]) != client.grant_id ||
+        !LowerHex(TextUntilNul(session.challenge[:]), 32) ||
+        session.expires_at <= now || session.expires_at > now + 300 ||
+        session.expires_at > grant.expires_at {
+        ClearDelegateSession(session)
+        return cast(AuthResult)AuthResult.AUTH_FAILED
+    }
+    for index: 0..cast(s32)client.scopes.count - 1 {
+        expected := client.scopes[index]
+        actual := grant.scopes[index]
+        if actual.collection != expected.collection || actual.read != expected.read ||
+            actual.write != expected.write {
+            ClearDelegateSession(session)
+                return cast(AuthResult)AuthResult.AUTH_FAILED
+        }
+    }
+    client.grant.* = candidate
+    return cast(AuthResult)AuthResult.AUTH_OK
+}
+#scope_export
+RequestRoute :: (method: string, path: string, query: string) -> bool {
+    if method == "POST" && path == "/api/v1/delegated/sync" {
+        return query == ""
+    }
+    if method == "GET" && path == "/api/v1/delegated/ws" && query.count > 11 &&
+        query[0:11] == "collection=" {
+        return Collection(query[11:query.count])
+    }
+    return false
+}
+#scope_export
+BuildProofMessage :: (proof: RequestProof, output: []u8) -> bool {
+    if output.count == 0 || !LowerHex(proof.grant_id, 32) ||
+        !LowerHex(proof.session_id, 32) || !LowerHex(proof.account_id, 64) ||
+        !Namespace(proof.app_id) || !LowerHex(proof.client_id, 64) ||
+        !LowerHex(proof.node_id, 64) || !LineText(proof.audience, 512) ||
+        !LowerHex(proof.challenge, 32) || !RequestRoute(proof.method, proof.path, proof.query) ||
+        !LowerHex(proof.body_sha256, 64) || proof.expires_at <= 0 || !LowerHex(proof.nonce, 32) {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "daochi-delegate-request-v1\n1\n")
+    writer = Line(writer, proof.grant_id)
+    writer = Line(writer, proof.session_id)
+    writer = Line(writer, proof.account_id)
+    writer = Line(writer, proof.app_id)
+    writer = Line(writer, proof.client_id)
+    writer = Line(writer, proof.node_id)
+    writer = Line(writer, proof.audience)
+    writer = Line(writer, proof.challenge)
+    writer = Line(writer, proof.method)
+    writer = Line(writer, proof.path)
+    writer = Line(writer, proof.query)
+    writer = Line(writer, proof.body_sha256)
+    writer = NumberLine(writer, proof.expires_at)
+    writer = Line(writer, proof.nonce)
+    return writer.valid
+}
+#scope_export
+BuildProofHeader :: (proof: RequestProof, signature: string, output: []u8) -> bool {
+    if output.count == 0 || !LowerHex(signature, 128) {
+        return false
+    }
+    checked: [2048]u8
+    if !BuildProofMessage(proof, checked[:]) {
+        return false
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "{\"version\":1,")
+    writer = JsonTextField(writer, "grant_id", proof.grant_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "session_id", proof.session_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "account_id", proof.account_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "app_id", proof.app_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "client_id", proof.client_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "node_id", proof.node_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "audience", proof.audience)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "challenge", proof.challenge)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "method", proof.method)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "path", proof.path)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "query", proof.query)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "body_sha256", proof.body_sha256)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "expires_at", proof.expires_at)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "nonce", proof.nonce)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "signature", signature)
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+#scope_export
+ScopeIndex :: (client: DelegateClient, collection: string, write: bool) -> s32 {
+    if client.grant == null || client.grant.version != 1 {
+        return -1
+    }
+    for index: 0..client.grant.scope_count - 1 {
+        scope := *client.grant.scopes[index]
+        if TextUntilNul(scope.collection[:]) == collection &&
+            (ifx write then scope.write else scope.read) {
+            return index
+        }
+    }
+    return -1
+}
+#scope_export
+BuildDelegatedSyncBody :: (client: DelegateClient, collection: string, read: bool,
+    since_version: s64, limit: s32, records: []DelegatedRecord, output: []u8) -> bool {
+    if !DelegateClientValid(client) || output.count == 0 || !Collection(collection) ||
+        since_version < 0 || limit < 1 || limit > 512 || records.count > 512 ||
+        (!read && records.count == 0) ||
+        (read && ScopeIndex(client, collection, false) < 0) ||
+        (records.count > 0 && ScopeIndex(client, collection, true) < 0) {
+        return false
+    }
+    index := ScopeIndex(client, collection, records.count > 0)
+    if index < 0 {
+        return false
+    }
+    key_id := TextUntilNul(client.grant.scopes[index].key_id[:])
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "{\"sync\":{\"protocol_version\":6,")
+    writer = JsonTextField(writer, "user_id_hash", client.account_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "client_id", client.client_id)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonTextField(writer, "app_id", client.app_id)
+    writer = WriteText(writer, ",\"encrypted_records\":[")
+    record_index: s32 = 0
+    for record: records {
+        if !Identifier(record.id, 1, 160) || record.key_id != key_id ||
+            !LineText(record.nonce, 4096) || !LineText(record.ciphertext, 1048576) ||
+            !LineText(record.updated_at, 64) || record.schema_version < 1 ||
+            !LowerHex(record.content_hash, 64) || (record.parent_id != "" && !Identifier(record.parent_id, 1, 160)) {
+            return false
+        }
+        if record_index > 0 {
+            writer = WriteByte(writer, cast(u8)44)
+        }
+        writer = WriteByte(writer, cast(u8)123)
+        writer = JsonTextField(writer, "collection", collection)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "id", record.id)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "key_id", record.key_id)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "nonce", record.nonce)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "ciphertext", record.ciphertext)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "updated_at", record.updated_at)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "content_hash", record.content_hash)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonNumberField(writer, "schema_version", cast(s64)record.schema_version)
+        writer = WriteByte(writer, cast(u8)44)
+        writer = JsonTextField(writer, "parent_id", record.parent_id)
+        writer = WriteByte(writer, cast(u8)125)
+        record_index += 1
+    }
+    writer = WriteText(writer, "]},")
+    writer = JsonTextField(writer, "collection", collection)
+    writer = WriteText(writer, ",\"read\":")
+    writer = WriteText(writer, ifx read then "true" else "false")
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "since_version", since_version)
+    writer = WriteByte(writer, cast(u8)44)
+    writer = JsonNumberField(writer, "limit", cast(s64)limit)
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+// Reject foreign generations and every unsupported sync member before signing.
+#scope_export
+DelegatedSyncBodyValid :: (client: DelegateClient, body: string) -> bool {
+    if !WholeJson(body) {
+        return false
+    }
+    names: [5]string = .["sync", "collection", "read", "since_version", "limit"]
+    fields: [5]s32
+    collection: [65]u8
+    read: bool
+    since_version: s64
+    limit: s64
+    if !ObjectFields(body, 0, names[:], fields[:]) ||
+        ReadStringText(body, fields[1], collection[:]) < 0 ||
+        !ReadBool(body, fields[2], *read) || !ReadInteger(body, fields[3], *since_version) ||
+        !ReadInteger(body, fields[4], *limit) || limit < 1 || limit > 512 {
+        return false
+    }
+    inner_names: [5]string = .["protocol_version", "user_id_hash", "client_id", "app_id", "encrypted_records"]
+    inner: [5]s32
+    protocol: s64
+    account: [65]u8
+    identifier: [65]u8
+    app: [65]u8
+    if !ObjectFields(body, fields[0], inner_names[:], inner[:]) ||
+        !ReadInteger(body, inner[0], *protocol) || protocol != 6 ||
+        ReadStringText(body, inner[1], account[:]) < 0 ||
+        ReadStringText(body, inner[2], identifier[:]) < 0 ||
+        ReadStringText(body, inner[3], app[:]) < 0 ||
+        TextUntilNul(account[:]) != client.account_id ||
+        TextUntilNul(identifier[:]) != client.client_id || TextUntilNul(app[:]) != client.app_id {
+        return false
+    }
+    records: [512]s32
+    count := ArrayPositions(body, inner[4], records[:])
+    selected := TextUntilNul(collection[:])
+    if count < 0 || count > 512 || (!read && count == 0) ||
+        (read && ScopeIndex(client, selected, false) < 0) ||
+        (count > 0 && ScopeIndex(client, selected, true) < 0) {
+        return false
+    }
+    if count == 0 {
+        return true
+    }
+    scope_index := ScopeIndex(client, selected, true)
+    key_id := TextUntilNul(client.grant.scopes[scope_index].key_id[:])
+    record_names: [9]string = .["collection", "id", "key_id", "nonce", "ciphertext",
+        "updated_at", "content_hash", "schema_version", "parent_id"]
+    for index: 0..count - 1 {
+        positions: [9]s32
+        record_collection: [65]u8
+        record_key: [129]u8
+        if !ObjectFields(body, records[index], record_names[:], positions[:]) ||
+            ReadStringText(body, positions[0], record_collection[:]) < 0 ||
+            ReadStringText(body, positions[2], record_key[:]) < 0 ||
+            TextUntilNul(record_collection[:]) != selected || TextUntilNul(record_key[:]) != key_id {
+            return false
+        }
+    }
+    return true
+}
+DelegatedResponseInfo :: struct {
+    collection: [65]u8
+    next_version: s64
+    truncated: bool
+    applied: s64
+    records_at: s32
+    record_count: s32
+}
+#scope_export
+ReadDelegatedSyncResponse :: (client: DelegateClient, body: string,
+    expected_collection: string, output: *DelegatedResponseInfo) -> bool {
+    if output == null || !WholeJson(body) ||
+        (ScopeIndex(client, expected_collection, false) < 0 &&
+            ScopeIndex(client, expected_collection, true) < 0) {
+        return false
+    }
+    output.* = DelegatedResponseInfo.{}
+    names: [5]string = .["collection", "records", "next_version", "truncated", "applied"]
+    positions: [5]s32
+    if !ObjectFields(body, 0, names[:], positions[:]) ||
+        ReadStringText(body, positions[0], output.collection[:]) < 0 ||
+        TextUntilNul(output.collection[:]) != expected_collection ||
+        !ReadInteger(body, positions[2], *output.next_version) ||
+        !ReadBool(body, positions[3], *output.truncated) ||
+        !ReadInteger(body, positions[4], *output.applied) || output.applied > 512 {
+        return false
+    }
+    output.records_at = positions[1]
+    if MatchLiteral(body, positions[1], "null") {
+        return true
+    }
+    records: [512]s32
+    count := ArrayPositions(body, positions[1], records[:])
+    if count < 0 || count > 512 ||
+        (count > 0 && ScopeIndex(client, expected_collection, false) < 0) {
+        return false
+    }
+    index := ScopeIndex(client, expected_collection, false)
+    record_names: [10]string = .["collection", "id", "key_id", "nonce", "ciphertext",
+        "updated_at", "deleted_at", "content_hash", "schema_version", "parent_id"]
+    for record: 0..count - 1 {
+        fields: [10]s32
+        collection: [65]u8
+        key_id: [129]u8
+        if !ObjectFieldsMinimum(body, records[record], record_names[:], fields[:], 3) ||
+            ReadStringText(body, fields[0], collection[:]) < 0 ||
+            ReadStringText(body, fields[2], key_id[:]) < 0 ||
+            TextUntilNul(collection[:]) != expected_collection ||
+            TextUntilNul(key_id[:]) != TextUntilNul(client.grant.scopes[index].key_id[:]) {
+            return false
+        }
+    }
+    output.record_count = count
+    return true
+}
+#scope_export
+ResponseMatchesRequest :: (client: DelegateClient, request_body: string, response: string) -> bool {
+    position := FieldAt(request_body, 0, "collection")
+    collection: [65]u8
+    info: DelegatedResponseInfo
+    return ReadStringText(request_body, position, collection[:]) >= 0 &&
+        ReadDelegatedSyncResponse(client, response, TextUntilNul(collection[:]), *info)
+}
+#scope_export
+PrepareDelegateHeaders :: (client: DelegateClient, session: *DelegateSession, now: s64,
+    method: string, path: string, query: string, body: string,
+    proof_header: []u8, credential: []u8) -> AuthResult {
+    if !SessionValid(client, session, now) || !RequestRoute(method, path, query) ||
+        proof_header.count == 0 || credential.count < 46 ||
+        (method == "POST" && !DelegatedSyncBodyValid(client, body)) ||
+        (method == "GET" && (body != "" || ScopeIndex(client, query[11:query.count], false) < 0)) {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    nonce: [33]u8
+    digest: [65]u8
+    if !client.random(client.random_context, nonce[:]) ||
+        !LowerHex(TextUntilNul(nonce[:]), 32) || !HashText(body, digest[:]) {
+        return cast(AuthResult)AuthResult.AUTH_SIGN_FAILED
+    }
+    expiry := now + 60
+    if expiry > session.expires_at {
+        expiry = session.expires_at
+    }
+    proof: RequestProof
+    proof.grant_id = client.grant_id
+    proof.session_id = TextUntilNul(session.session_id[:])
+    proof.account_id = client.account_id
+    proof.app_id = client.app_id
+    proof.client_id = client.client_id
+    proof.node_id = client.node_id
+    proof.audience = client.audience
+    proof.challenge = TextUntilNul(session.challenge[:])
+    proof.method = method
+    proof.path = path
+    proof.query = query
+    proof.body_sha256 = TextUntilNul(digest[:])
+    proof.expires_at = expiry
+    proof.nonce = TextUntilNul(nonce[:])
+    message: [2048]u8
+    signature: [129]u8
+    if !BuildProofMessage(proof, message[:]) ||
+        !client.signer(client.signing_context, TextUntilNul(message[:]), signature[:]) ||
+        !LowerHex(TextUntilNul(signature[:]), 128) ||
+        !BuildProofHeader(proof, TextUntilNul(signature[:]), proof_header) {
+        return cast(AuthResult)AuthResult.AUTH_SIGN_FAILED
+    }
+    writer: Writer = .{credential, 0, true}
+    writer = WriteText(writer, "Delegate ds1.")
+    writer = WriteText(writer, proof.session_id)
+    if !writer.valid {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    return cast(AuthResult)AuthResult.AUTH_OK
+}
+#scope_export
+RenewDelegateSession :: (client: DelegateClient, session: *DelegateSession,
+    now: s64, response: []u8) -> AuthResult {
+    if !DelegateClientValid(client) || client.send == null || session == null || response.count < 8192 {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    ClearDelegateSession(session)
+    address: [768]u8
+    body: [512]u8
+    if !JoinUrl(client.server_url, "/api/v1/authorization/challenge", address[:]) ||
+        !BuildIDBody("grant_id", client.grant_id, "", body[:]) {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    status: s32
+    challenge_json: [2048]u8
+    {
+        request: HttpRequest
+        request.method = "POST"
+        request.url = TextUntilNul(address[:])
+        request.accept = "application/json"
+        request.content_type = "application/json"
+        request.body = TextUntilNul(body[:])
+        if !client.send(client.transport_context, request, challenge_json[:], *status) || status != 200 {
+            return cast(AuthResult)AuthResult.AUTH_CHALLENGE_FAILED
+        }
+    }
+    challenge: SessionChallenge
+    if !ReadChallenge(TextUntilNul(challenge_json[:]), *challenge) ||
+        !PrepareSessionBody(client, *challenge, now, body[:]) ||
+        !JoinUrl(client.server_url, "/api/v1/authorization/session", address[:]) {
+        return cast(AuthResult)AuthResult.AUTH_FAILED
+    }
+    request: HttpRequest
+    request.method = "POST"
+    request.url = TextUntilNul(address[:])
+    request.accept = "application/json"
+    request.content_type = "application/json"
+    request.body = TextUntilNul(body[:])
+    response[0] = 0
+    if !client.send(client.transport_context, request, response, *status) {
+        return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
+    }
+    return AcceptSessionAnswer(client, status, TextUntilNul(response), now, session)
+}
+#scope_export
+DelegateRequest :: (client: DelegateClient, session: *DelegateSession, now: s64,
+    body: string, output: []u8, status: *s32) -> AuthResult {
+    if client.send == null || output.count == 0 || status == null || body.count == 0 {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    output[0] = 0
+    status.* = 0
+    header: [4096]u8
+    credential: [46]u8
+    prepared := PrepareDelegateHeaders(client, session, now, "POST",
+        "/api/v1/delegated/sync", "", body, header[:], credential[:])
+    if prepared != cast(AuthResult)AuthResult.AUTH_OK {
+        return prepared
+    }
+    address: [768]u8
+    if !JoinUrl(client.server_url, "/api/v1/delegated/sync", address[:]) {
+        return cast(AuthResult)AuthResult.AUTH_INVALID_URL
+    }
+    headers: [2]HttpHeader
+    headers[0].name = "Authorization"
+    headers[0].value = TextUntilNul(credential[:])
+    headers[1].name = "X-Daochi-Delegate"
+    headers[1].value = TextUntilNul(header[:])
+    request: HttpRequest
+    request.method = "POST"
+    request.url = TextUntilNul(address[:])
+    request.accept = "application/json"
+    request.content_type = "application/json"
+    request.body = body
+    request.headers = headers[:]
+    if !client.send(client.transport_context, request, output, status) {
+        return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
+    }
+    if status.* == 401 || status.* == 403 {
+        ClearDelegateSession(session)
+        return cast(AuthResult)AuthResult.AUTH_FAILED
+    }
+    if status.* < 200 || status.* >= 300 {
+        return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
+    }
+    if !ResponseMatchesRequest(client, body, TextUntilNul(output)) {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    return cast(AuthResult)AuthResult.AUTH_OK
+}
