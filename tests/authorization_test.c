@@ -20,6 +20,35 @@ static DelegateClient client;
 static int transfers, polls, stage, cancels, nonce_counter;
 static int response_status;
 static bool active, failed_transport;
+static int64_t clock_now = 1791400000;
+static int64_t server_advance, challenge_delivery_delay, session_delivery_delay, sign_advance;
+static bool dynamic_timing;
+static int64_t current_time(void *context)
+{
+    (void)context;
+    return clock_now;
+}
+
+static void replace_number(char *json, const char *name, int64_t value)
+{
+    char key[64];
+    snprintf(key, sizeof key, "\"%s\"", name);
+    char *found = strstr(json, key);
+    assert(found);
+    char *start = strchr(found, ':') + 1;
+    while (*start == ' ') {
+        start++;
+    }
+    char *end = start;
+    while (*end >= '0' && *end <= '9') {
+        end++;
+    }
+    char number[32];
+    snprintf(number, sizeof number, "%lld", (long long)value);
+    size_t count = strlen(number);
+    memmove(start + count, end, strlen(end) + 1);
+    memcpy(start, number, count);
+}
 
 static String text(const char *value)
 {
@@ -58,6 +87,7 @@ static bool sign_delegate(void *context, String message, Slice output)
     if (StringEqual(message, text(expected_session_message))) {
         copy_output(output, session_signature);
     } else {
+        clock_now += sign_advance;
         memset(output.data, 'a', 128);
         ((char *)output.data)[128] = 0;
     }
@@ -88,11 +118,23 @@ static bool start(void *context, HttpRequest request, Slice output)
     if (strstr(url, "/authorization/challenge")) {
         stage = 1;
         assert(request.headers.length == 0);
-        copy_output(output, challenge_json);
+        clock_now += server_advance;
+        char current[2048];
+        strcpy(current, challenge_json);
+        if (dynamic_timing) {
+            replace_number(current, "expires_at", clock_now + 90);
+        }
+        copy_output(output, current);
     } else if (strstr(url, "/authorization/session")) {
         stage = 2;
         assert(request.headers.length == 0);
-        copy_output(output, answer);
+        clock_now += server_advance;
+        char current[18000];
+        strcpy(current, answer);
+        if (dynamic_timing) {
+            replace_number(current, "expires_at", clock_now + 300);
+        }
+        copy_output(output, current);
     } else {
         stage = 3;
         assert(strstr(url, "/delegated/sync"));
@@ -115,6 +157,12 @@ static int32_t poll(void *context, int32_t *status)
         return -1;
     }
     active = false;
+    if (stage == 1) {
+        clock_now += challenge_delivery_delay;
+    }
+    if (stage == 2) {
+        clock_now += session_delivery_delay;
+    }
     *status = stage == 3 ? response_status : 200;
     return failed_transport ? 0 : 1;
 }
@@ -185,7 +233,8 @@ static void configure(String document)
         .signing_key = text((char *)original.signing_key),
         .encryption_key = text((char *)original.encryption_key),
         .scopes = bytes(wanted, 1), .grant = &verified,
-        .signer = sign_delegate, .random = random_id, .send = send,
+        .signer = sign_delegate, .random = random_id, .send = send, .clock = current_time,
+        .bot_id = original.bot_id, .telegram_id = original.telegram_id,
     };
 }
 
@@ -271,7 +320,9 @@ static void check_acceptance(void)
     wanted[0].write = false;
     assert(delegated_AcceptSessionAnswer(client, 200, text(answer), 1791400000, &session) == AuthResult_AUTH_FAILED);
     wanted[0].write = true;
-    assert(delegated_AcceptSessionAnswer(client, 200, text(answer), 1791400300, &session) == AuthResult_AUTH_FAILED);
+    clock_now = 1791400300;
+    assert(delegated_AcceptSessionAnswer(client, 200, text(answer), 1791400000, &session) == AuthResult_AUTH_FAILED);
+    clock_now = 1791400000;
     assert(delegated_AcceptSessionAnswer(client, 401, text(answer), 1791400000, &session) == AuthResult_AUTH_FAILED);
     char mutated[18000];
     strcpy(mutated, answer);
@@ -443,6 +494,140 @@ static void check_transports(void)
     assert(authorization_owner_OwnerAuthorizationRoute(StringLiteral("/api/v1/authorization/revoke")));
 }
 
+static void reset_timing(void)
+{
+    active = false;
+    failed_transport = false;
+    response_status = 200;
+    transfers = 0;
+    clock_now = 1791400000;
+    server_advance = 0;
+    challenge_delivery_delay = 0;
+    session_delivery_delay = 0;
+    sign_advance = 0;
+    dynamic_timing = true;
+}
+
+static void check_advancing_clock(void)
+{
+    char output[18000], body[4096], proof[4096], credential[46];
+    DelegateSession session = {0};
+    reset_timing();
+    server_advance = 1;
+    assert(delegated_RenewDelegateSession(client, &session, 1,
+        bytes(output, sizeof output)) == AuthResult_AUTH_OK);
+    assert(clock_now == 1791400002 && session.expires_at == clock_now + 300);
+    assert(delegated_BuildDelegatedSyncBody(client, wanted[0].collection, true, 0, 128,
+        bytes(NULL, 0), bytes(body, sizeof body)));
+    assert(delegated_PrepareDelegateHeaders(client, &session, 1,
+        StringLiteral("POST"), StringLiteral("/api/v1/delegated/sync"), StringLiteral(""),
+        text(body), bytes(proof, sizeof proof), bytes(credential, sizeof credential)) == AuthResult_AUTH_OK);
+    int64_t expiry;
+    assert(authorization_ReadInteger(text(proof), FieldAt(text(proof), 0,
+        StringLiteral("expires_at")), &expiry));
+    assert(expiry == clock_now + 60);
+    AsyncTransport transport = {.start = {.call = start_async},
+        .poll = {.call = poll_async}, .cancel = {.call = cancel_async}};
+    PendingDelegate pending = {0};
+    reset_timing();
+    server_advance = 1;
+    session = (DelegateSession){0};
+    assert(async_delegated_BeginDelegateRequest(&pending, client, &session, 1,
+        transport, text(body), bytes(output, sizeof output)));
+    while (!async_delegated_PollDelegate(&pending)) {
+    }
+    assert(pending.result == AuthResult_AUTH_OK && transfers == 3);
+    assert(clock_now == 1791400002);
+    reset_timing();
+    server_advance = 1;
+    session.expires_at = clock_now + 4;
+    pending = (PendingDelegate){0};
+    assert(async_delegated_BeginDelegateRequest(&pending, client, &session, 1,
+        transport, text(body), bytes(output, sizeof output)));
+    while (!async_delegated_PollDelegate(&pending)) {
+    }
+    assert(pending.result == AuthResult_AUTH_OK && transfers == 3);
+    assert(session.expires_at == clock_now + 300);
+    reset_timing();
+    challenge_delivery_delay = 91;
+    session = (DelegateSession){0};
+    assert(delegated_RenewDelegateSession(client, &session, 1,
+        bytes(output, sizeof output)) == AuthResult_AUTH_FAILED);
+    assert(transfers == 1 && !session.session_id[0]);
+    reset_timing();
+    session_delivery_delay = 301;
+    pending = (PendingDelegate){0};
+    assert(async_delegated_BeginDelegateSession(&pending, client, &session, 1,
+        transport, bytes(output, sizeof output)));
+    while (!async_delegated_PollDelegate(&pending)) {
+    }
+    assert(pending.result == AuthResult_AUTH_FAILED && transfers == 2 && !session.session_id[0]);
+    reset_timing();
+    assert(delegated_RenewDelegateSession(client, &session, 1,
+        bytes(output, sizeof output)) == AuthResult_AUTH_OK);
+    transfers = 0;
+    sign_advance = 61;
+    int32_t status;
+    assert(delegated_DelegateRequest(client, &session, 1, text(body),
+        bytes(output, sizeof output), &status) == AuthResult_AUTH_SIGN_FAILED);
+    assert(transfers == 0);
+    sign_advance = 0;
+    clock_now = 0;
+    assert(!delegated_SessionValid(client, &session, 1791400000));
+    assert(delegated_RenewDelegateSession(client, &session, 1791400000,
+        bytes(output, sizeof output)) == AuthResult_AUTH_PAYLOAD_FAILED);
+    DelegateClient no_clock = client;
+    no_clock.clock = NULL;
+    assert(!delegated_DelegateClientValid(no_clock));
+    assert(delegated_RenewDelegateSession(no_clock, &session, 1791400000,
+        bytes(output, sizeof output)) == AuthResult_AUTH_PAYLOAD_FAILED);
+    reset_timing();
+    dynamic_timing = false;
+}
+
+static void check_telegram_binding(String document)
+{
+    AccountKeys owner;
+    assert(CreateAccountKeys(&owner));
+    GrantScope scopes[16];
+    Grant grant = {0};
+    assert(authorization_ViewGrant(&original, bytes(scopes, 16), &grant));
+    grant.account_id = text((char *)owner.public_id);
+    grant.bot_id = 123456;
+    grant.telegram_id = 1234;
+    char message[8192], signature[4841], grant_json[12000], telegram_answer[18000];
+    assert(authorization_BuildGrantMessage(grant, bytes(message, sizeof message)));
+    assert(SignAccountMessage(&owner, text(message), bytes(signature, sizeof signature)));
+    grant.signature = text(signature);
+    assert(authorization_BuildGrantBody(grant, bytes(grant_json, sizeof grant_json)));
+    String credential = object(object(document, "answer"), "credential");
+    int count = snprintf(telegram_answer, sizeof telegram_answer,
+        "{\"credential\":%.*s,\"grant\":%s,\"owner_public_key\":\"%s\"}",
+        (int)credential.length, credential.data, grant_json, owner.public_key_hex);
+    assert(count > 0 && count < (int)sizeof telegram_answer);
+    DelegateClient telegram = client;
+    telegram.account_id = grant.account_id;
+    telegram.bot_id = grant.bot_id;
+    telegram.telegram_id = grant.telegram_id;
+    DelegateSession session;
+    assert(delegated_AcceptSessionAnswer(telegram, 200, text(telegram_answer), 1,
+        &session) == AuthResult_AUTH_OK);
+    telegram.bot_id = 123457;
+    assert(delegated_AcceptSessionAnswer(telegram, 200, text(telegram_answer), 1,
+        &session) == AuthResult_AUTH_FAILED);
+    telegram.bot_id = 123456;
+    telegram.telegram_id = 1235;
+    assert(delegated_AcceptSessionAnswer(telegram, 200, text(telegram_answer), 1,
+        &session) == AuthResult_AUTH_FAILED);
+    telegram.bot_id = 0;
+    telegram.telegram_id = 0;
+    assert(delegated_AcceptSessionAnswer(telegram, 200, text(telegram_answer), 1,
+        &session) == AuthResult_AUTH_FAILED);
+    telegram.bot_id = 123456;
+    assert(!delegated_DelegateClientValid(telegram));
+    SecureWipe(owner.private_key_hex, sizeof owner.private_key_hex);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -458,6 +643,8 @@ int main(int argc, char **argv)
     check_acceptance();
     check_envelopes();
     check_transports();
+    check_advancing_clock();
+    check_telegram_binding(document);
     puts("Daochi delegated fixtures, ownership, scopes, envelopes and async transports passed");
     return 0;
 }

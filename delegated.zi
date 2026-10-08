@@ -8,6 +8,7 @@
 #import "text_buffer"
 #import "json_scan"
 
+CurrentTime :: #type (context: *void) -> s64 #c_call;
 RandomID :: #type (context: *void, output: []u8) -> bool #c_call;
 DelegateClient :: struct {
     server_url: string
@@ -19,6 +20,10 @@ DelegateClient :: struct {
     audience: string
     signing_key: string
     encryption_key: string
+    bot_id: s64
+    telegram_id: s64
+    clock_context: *void
+    clock: CurrentTime
     scopes: []RequestedScope
     grant: *GrantStorage
     signing_context: *void
@@ -62,13 +67,33 @@ DelegateClientValid :: (client: DelegateClient) -> bool {
         LowerHex(client.node_id, 64) && LowerHex(client.signing_key, 64) &&
         LowerHex(client.encryption_key, 2368) && client.grant != null &&
         client.scopes.count >= 1 && client.scopes.count <= 16 &&
-        client.signer != null && client.random != null &&
+        client.signer != null && client.random != null && client.clock != null &&
+        client.bot_id >= 0 && client.bot_id <= 4503599627370495 &&
+        client.telegram_id >= 0 && client.telegram_id <= 4503599627370495 &&
+        ((client.bot_id == 0) == (client.telegram_id == 0)) &&
         NormalizeUrl(client.server_url, normalized[:]) &&
         TextUntilNul(normalized[:]) == client.audience
 }
 #scope_export
+CurrentDelegateTime :: (client: DelegateClient) -> s64 {
+    if client.clock == null {
+        return 0
+    }
+    now := client.clock(client.clock_context)
+    if now <= 0 || now > 9007199254740691 {
+        return 0
+    }
+    return now
+}
+#scope_export
+DelegateExpiryCurrent :: (client: DelegateClient, expires_at: s64) -> bool {
+    now := CurrentDelegateTime(client)
+    return now > 0 && expires_at > now
+}
+#scope_export
 SessionValid :: (client: DelegateClient, session: *DelegateSession, now: s64) -> bool {
-    return DelegateClientValid(client) && session != null &&
+    now = CurrentDelegateTime(client)
+    return now > 0 && DelegateClientValid(client) && session != null &&
         LowerHex(TextUntilNul(session.session_id[:]), 32) &&
         TextUntilNul(session.grant_id[:]) == client.grant_id &&
         LowerHex(TextUntilNul(session.challenge[:]), 32) &&
@@ -103,7 +128,8 @@ BuildSessionMessage :: (challenge: *SessionChallenge, output: []u8) -> bool {
 #scope_export
 PrepareSessionBody :: (client: DelegateClient, challenge: *SessionChallenge,
     now: s64, output: []u8) -> bool {
-    if !DelegateClientValid(client) || challenge == null || output.count == 0 ||
+    now = CurrentDelegateTime(client)
+    if now <= 0 || !DelegateClientValid(client) || challenge == null || output.count == 0 ||
         TextUntilNul(challenge.grant_id[:]) != client.grant_id ||
         TextUntilNul(challenge.node_id[:]) != client.node_id ||
         TextUntilNul(challenge.audience[:]) != client.audience ||
@@ -114,7 +140,8 @@ PrepareSessionBody :: (client: DelegateClient, challenge: *SessionChallenge,
     signature: [129]u8
     if !BuildSessionMessage(challenge, message[:]) ||
         !client.signer(client.signing_context, TextUntilNul(message[:]), signature[:]) ||
-        !LowerHex(TextUntilNul(signature[:]), 128) {
+        !LowerHex(TextUntilNul(signature[:]), 128) ||
+        !DelegateExpiryCurrent(client, challenge.expires_at) {
         return false
     }
     output[0] = 0
@@ -131,7 +158,8 @@ PrepareSessionBody :: (client: DelegateClient, challenge: *SessionChallenge,
 #scope_export
 AcceptSessionAnswer :: (client: DelegateClient, status: s32, json: string,
     now: s64, session: *DelegateSession) -> AuthResult {
-    if session == null || !DelegateClientValid(client) {
+    now = CurrentDelegateTime(client)
+    if now <= 0 || session == null || !DelegateClientValid(client) {
         return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
     }
     ClearDelegateSession(session)
@@ -160,6 +188,7 @@ AcceptSessionAnswer :: (client: DelegateClient, status: s32, json: string,
         grant.client_id != client.client_id || grant.grant_id != client.grant_id ||
         grant.node_id != client.node_id || grant.audience != client.audience ||
         grant.signing_key != client.signing_key || grant.encryption_key != client.encryption_key ||
+        grant.bot_id != client.bot_id || grant.telegram_id != client.telegram_id ||
         grant.scopes.count != client.scopes.count ||
         !LowerHex(TextUntilNul(session.session_id[:]), 32) ||
         TextUntilNul(session.grant_id[:]) != client.grant_id ||
@@ -177,6 +206,11 @@ AcceptSessionAnswer :: (client: DelegateClient, status: s32, json: string,
             ClearDelegateSession(session)
                 return cast(AuthResult)AuthResult.AUTH_FAILED
         }
+    }
+    if !DelegateExpiryCurrent(client, session.expires_at) ||
+        !DelegateExpiryCurrent(client, grant.expires_at) {
+        ClearDelegateSession(session)
+        return cast(AuthResult)AuthResult.AUTH_FAILED
     }
     client.grant.* = candidate
     return cast(AuthResult)AuthResult.AUTH_OK
@@ -474,7 +508,8 @@ ResponseMatchesRequest :: (client: DelegateClient, request_body: string, respons
 PrepareDelegateHeaders :: (client: DelegateClient, session: *DelegateSession, now: s64,
     method: string, path: string, query: string, body: string,
     proof_header: []u8, credential: []u8) -> AuthResult {
-    if !SessionValid(client, session, now) || !RequestRoute(method, path, query) ||
+    now = CurrentDelegateTime(client)
+    if now <= 0 || !SessionValid(client, session, now) || !RequestRoute(method, path, query) ||
         proof_header.count == 0 || credential.count < 46 ||
         (method == "POST" && !DelegatedSyncBodyValid(client, body)) ||
         (method == "GET" && (body != "" || ScopeIndex(client, query[11:query.count], false) < 0)) {
@@ -510,7 +545,8 @@ PrepareDelegateHeaders :: (client: DelegateClient, session: *DelegateSession, no
     if !BuildProofMessage(proof, message[:]) ||
         !client.signer(client.signing_context, TextUntilNul(message[:]), signature[:]) ||
         !LowerHex(TextUntilNul(signature[:]), 128) ||
-        !BuildProofHeader(proof, TextUntilNul(signature[:]), proof_header) {
+        !BuildProofHeader(proof, TextUntilNul(signature[:]), proof_header) ||
+        !DelegateExpiryCurrent(client, proof.expires_at) {
         return cast(AuthResult)AuthResult.AUTH_SIGN_FAILED
     }
     writer: Writer = .{credential, 0, true}
@@ -524,7 +560,8 @@ PrepareDelegateHeaders :: (client: DelegateClient, session: *DelegateSession, no
 #scope_export
 RenewDelegateSession :: (client: DelegateClient, session: *DelegateSession,
     now: s64, response: []u8) -> AuthResult {
-    if !DelegateClientValid(client) || client.send == null || session == null || response.count < 8192 {
+    now = CurrentDelegateTime(client)
+    if now <= 0 || !DelegateClientValid(client) || client.send == null || session == null || response.count < 8192 {
         return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
     }
     ClearDelegateSession(session)

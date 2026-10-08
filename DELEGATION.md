@@ -35,8 +35,12 @@ and leaves it zero on failure. The node stores the envelope as opaque text, whos
 hash is bound by the owner signature. The library never stores master keys,
 delegate keys, sessions, recovery data or tokens.
 
+A `DelegateClient` requires a host `CurrentTime(context)` callback returning current
+Unix seconds. Every challenge/session validation and request-signing stage reads
+it again, including after each async transfer. Missing or invalid clocks fail
+closed; no handshake start time or supplied `now` argument is used as a fallback.
 A `DelegateClient` contains the expected grant identity, app, client, issuing node,
-audience, signing/encryption public keys and requested scopes. Its `GrantStorage`
+audience, signing/encryption public keys, verified bot/user identity pair and requested scopes. Its `GrantStorage`
 contains owned decoded values; `ViewGrant(storage, scopes, output)` creates a
 borrowed view while those buffers remain alive. `AcceptSessionAnswer` validates
 the owner public-key hash against the account identity and verifies the real

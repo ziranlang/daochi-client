@@ -34,7 +34,8 @@ FinishDelegate :: (pending: *PendingDelegate, result: AuthResult) {
 }
 StartDelegateTransfer :: (pending: *PendingDelegate, path: string,
     body: string, output: []u8, stage: s32, headers: []HttpHeader) {
-    if output.count == 0 || !JoinUrl(pending.client.server_url, path, pending.address[:]) {
+    pending.now = CurrentDelegateTime(pending.client)
+    if pending.now <= 0 || output.count == 0 || !JoinUrl(pending.client.server_url, path, pending.address[:]) {
         FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
         return
     }
@@ -88,16 +89,17 @@ InitializeDelegate :: (pending: *PendingDelegate, client: DelegateClient,
     pending.* = PendingDelegate.{}
     pending.client = client
     pending.session = session
-    pending.now = now
+    unused now
+    pending.now = CurrentDelegateTime(client)
     pending.transport = transport
     pending.output = output
     pending.session_only = session_only
     pending.body = body
-    if !DelegateClientValid(client) || output.count < 8192 || (!session_only && body.count == 0) {
+    if pending.now <= 0 || !DelegateClientValid(client) || output.count < 8192 || (!session_only && body.count == 0) {
         FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
         return true
     }
-    if SessionValid(client, session, now) {
+    if SessionValid(client, session, pending.now) {
         if session_only {
             FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_OK)
         } else {
@@ -131,6 +133,12 @@ PollDelegate :: (pending: *PendingDelegate) -> bool {
         return false
     }
     pending.waiting = false
+    pending.now = CurrentDelegateTime(pending.client)
+    if pending.now <= 0 {
+        ClearDelegateSession(pending.session)
+        FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_FAILED)
+        return true
+    }
     if polled == 0 {
         FinishDelegate(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
         return true
