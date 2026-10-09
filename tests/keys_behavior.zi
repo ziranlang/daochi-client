@@ -48,6 +48,23 @@ main :: () -> s32 {
     if TextUntilNul(id[:]) != TextUntilNul(account.public_id[:]) {
         return 6
     }
+    binary_id: [32]u8
+    private_key: [2560]u8
+    defer { Cleanse(private_key[:]) }
+    if HexToBytes(TextUntilNul(id[:]), *binary_id[0], 32) == 0 ||
+        HexToBytes(TextUntilNul(account.private_key_hex[:]), *private_key[0], 2560) == 0 ||
+        !ValidateIdentity(binary_id[:], public_key[:], private_key[:]) {
+        return 14
+    }
+    binary_id[0] ^= 1
+    if ValidateIdentity(binary_id[:], public_key[:], private_key[:]) { return 15 }
+    binary_id[0] ^= 1
+    other: AccountKeys
+    if CreateAccountKeys(*other) == 0 ||
+        HexToBytes(TextUntilNul(other.private_key_hex[:]), *private_key[0], 2560) == 0 ||
+        ValidateIdentity(binary_id[:], public_key[:], private_key[:]) {
+        return 16
+    }
 
     message: [32]u8
     if !CopyCString("daochi-sync-v1 login", message[:]) {

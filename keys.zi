@@ -49,6 +49,29 @@ SecureWipe :: (output: *u8, length: s64) {
 AccountPublicKeyBytes :: 1312
 AccountPrivateKeyBytes :: 2560
 
+// Validate an existing binary account without generating or replacing keys.
+// A private-key proof is required as well as the public-key account digest.
+#scope_export
+ValidateIdentity :: (account_id: []u8, public_key: []u8, private_key: []u8) -> bool {
+    if account_id.count != 32 || public_key.count != AccountPublicKeyBytes ||
+        private_key.count != AccountPrivateKeyBytes {
+        return false
+    }
+    digest: [32]u8
+    Sha256(*public_key[0], public_key.count, *digest[0])
+    difference: u8 = 0
+    for index: 0..31 { difference |= digest[index] ^ account_id[index] }
+    if difference != 0 { return false }
+    message: [32]u8
+    signature: [2420]u8
+    defer { Cleanse(message[:]); Cleanse(signature[:]) }
+    if SecureRandom(*message[0], 32) == 0 ||
+        MlDsa44Sign(signature[:], message[:], private_key) != 2420 {
+        return false
+    }
+    return MlDsa44Verify(message[:], signature[:], public_key)
+}
+
 AccountValuesEqual :: (left: *AccountKeys, right: *AccountKeys) -> bool {
     if left == null || right == null {
         return false

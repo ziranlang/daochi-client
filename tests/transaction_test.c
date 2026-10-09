@@ -63,6 +63,40 @@ int main(void)
     assert(strstr(output, "\"signature_context\":\"daochi-tx-v1\"") != NULL);
     assert(strstr(output, "\"device_signature\":\"dddd") != NULL);
 
+    char legacy[8192];
+    strcpy(legacy, output);
+    assert(BuildTransactionHeader(transaction, StringLiteral("POST"), StringLiteral("/api/v1/sync"),
+        StringView(account_signature, 4840), StringView(device_signature, 128), buffer));
+    assert(strcmp(legacy, output) == 0);
+    assert(BuildSyncTransactionMessage(transaction, buffer));
+    strcpy(legacy, output);
+    assert(BuildTransactionMessage(transaction, StringLiteral("POST"), StringLiteral("/api/v1/sync"), buffer));
+    assert(strcmp(legacy, output) == 0);
+    const char *methods[] = {"GET", "HEAD", "PUT", "POST"};
+    for (size_t i = 0; i < sizeof methods / sizeof *methods; i++) {
+        String method = StringView(methods[i], strlen(methods[i]));
+        String path = StringLiteral("/api/v1/blobs/photos/abcdef?part=1");
+        assert(BuildTransactionMessage(transaction, method, path, buffer));
+        char expected[128];
+        snprintf(expected, sizeof expected, "\n%s\n/api/v1/blobs/photos/abcdef?part=1\n", methods[i]);
+        assert(strstr(output, expected));
+        assert(BuildTransactionHeader(transaction, method, path,
+            StringView(account_signature, 4840), StringView(device_signature, 128), buffer));
+        snprintf(expected, sizeof expected, "\"method\":\"%s\",\"path\":\"/api/v1/blobs/photos/abcdef?part=1\"", methods[i]);
+        assert(strstr(output, expected));
+    }
+    const char *invalid_paths[] = {"", "https://example.com/api/v1/sync", "/api/v1/sync\nGET", "/api/v1/sync\r", "/api/v1/sync bad", "/bad\\path", "/bad\"path"};
+    for (size_t i = 0; i < sizeof invalid_paths / sizeof *invalid_paths; i++) {
+        String path = StringView(invalid_paths[i], strlen(invalid_paths[i]));
+        assert(!BuildTransactionMessage(transaction, StringLiteral("POST"), path, buffer));
+        assert(output[0] == 0);
+        assert(!BuildTransactionHeader(transaction, StringLiteral("POST"), path,
+            StringView(account_signature, 4840), StringView(device_signature, 128), buffer));
+        assert(output[0] == 0);
+    }
+    assert(!BuildTransactionMessage(transaction, StringLiteral("post"), StringLiteral("/api/v1/sync"), buffer));
+    assert(output[0] == 0);
+
     buffer.length = 32;
     assert(!BuildSyncTransactionHeader(transaction,
         StringView(account_signature, 4840),

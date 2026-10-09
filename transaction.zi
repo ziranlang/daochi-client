@@ -171,11 +171,24 @@ BuildDeviceRegistrationBody :: (request: DeviceRegistration,
 #program_export
 BuildSyncTransactionMessage :: (transaction: SyncTransaction,
     output: []u8) -> bool {
+    return BuildTransactionMessage(transaction, "POST", "/api/v1/sync", output)
+}
+
+RequestValid :: (method: string, path: string) -> bool {
+    return (method == "GET" || method == "HEAD" || method == "POST" || method == "PUT" ||
+        method == "PATCH" || method == "DELETE" || method == "OPTIONS") &&
+        path.count > 0 && path.count <= 2048 && path[0] == 47 && PlainText(path)
+}
+
+#scope_export
+#program_export
+BuildTransactionMessage :: (transaction: SyncTransaction, method: string, path: string,
+    output: []u8) -> bool {
     if output.count == 0 {
         return false
     }
     output[0] = cast(u8)0
-    if !TransactionValid(transaction) {
+    if !TransactionValid(transaction) || !RequestValid(method, path) {
         return false
     }
     writer: Writer = Writer.{output, 0, true}
@@ -187,7 +200,11 @@ BuildSyncTransactionMessage :: (transaction: SyncTransaction,
     writer = WriteText(writer, transaction.app_id)
     writer = WriteByte(writer, cast(u8)10)
     writer = WriteText(writer, transaction.device_key_id)
-    writer = WriteText(writer, "\nPOST\n/api/v1/sync\n")
+    writer = WriteByte(writer, cast(u8)10)
+    writer = WriteText(writer, method)
+    writer = WriteByte(writer, cast(u8)10)
+    writer = WriteText(writer, path)
+    writer = WriteByte(writer, cast(u8)10)
     writer = WriteText(writer, transaction.body_sha256_hex)
     writer = WriteByte(writer, cast(u8)10)
     writer = WriteText(writer, transaction.nonce)
@@ -206,11 +223,19 @@ BuildSyncTransactionMessage :: (transaction: SyncTransaction,
 BuildSyncTransactionHeader :: (transaction: SyncTransaction,
     account_signature_hex: string, device_signature_hex: string,
     output: []u8) -> bool {
+    return BuildTransactionHeader(transaction, "POST", "/api/v1/sync",
+        account_signature_hex, device_signature_hex, output)
+}
+
+#scope_export
+#program_export
+BuildTransactionHeader :: (transaction: SyncTransaction, method: string, path: string,
+    account_signature_hex: string, device_signature_hex: string, output: []u8) -> bool {
     if output.count == 0 {
         return false
     }
     output[0] = cast(u8)0
-    if !TransactionValid(transaction) ||
+    if !TransactionValid(transaction) || !RequestValid(method, path) ||
         !HexText(account_signature_hex, 4840) ||
         !HexText(device_signature_hex, 128) {
         return false
@@ -224,8 +249,11 @@ BuildSyncTransactionHeader :: (transaction: SyncTransaction,
     writer = AppendJsonQuoted(writer, transaction.app_id)
     writer = WriteText(writer, ",\"device_key_id\":")
     writer = AppendJsonQuoted(writer, transaction.device_key_id)
-    writer = WriteText(writer,
-        ",\"method\":\"POST\",\"path\":\"/api/v1/sync\",\"body_sha256\":")
+    writer = WriteText(writer, ",\"method\":")
+    writer = AppendJsonQuoted(writer, method)
+    writer = WriteText(writer, ",\"path\":")
+    writer = AppendJsonQuoted(writer, path)
+    writer = WriteText(writer, ",\"body_sha256\":")
     writer = AppendJsonQuoted(writer, transaction.body_sha256_hex)
     writer = WriteText(writer, ",\"nonce\":")
     writer = AppendJsonQuoted(writer, transaction.nonce)
