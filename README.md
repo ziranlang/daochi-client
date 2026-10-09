@@ -1,5 +1,14 @@
 # Daochi Client
 
+Native clients can import `daochi_client/crypto_native` for bounded byte-slice
+SHA-256, streaming digests, HMAC-SHA-256, XChaCha20-Poly1305, secure random bytes,
+clearing buffers and compatible Argon2id exports. Link libsodium for this optional
+provider; it uses the same 24-byte nonces and appended authentication tags as
+existing encrypted content. Applications retain their account and content keys,
+authenticated schema context, storage, and node policy. `keys.ValidateIdentity`
+verifies an existing binary ML-DSA-44 account and private-key proof without
+creating or replacing keys.
+
 Daochi Client is the independent Ziran library for applications that sync with
 Daochi. It contains no server, mesh node, database, or UI implementation.
 It has no Kryon dependency and lives in the

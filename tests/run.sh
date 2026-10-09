@@ -41,6 +41,15 @@ for test in wire auth url client transaction sync social account events; do
     env -u DISPLAY -u WAYLAND_DISPLAY "$work/${test}_test"
 done
 
+"$compiler" --no-main --root "$root" --module-path "$ziran/std" \
+    -o "$work/native-crypto" "$root/crypto_native.zi"
+"${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror \
+    -Wno-unused-function -Wno-unused-variable \
+    -I"$ziran/include" -I"$work/native-crypto" \
+    "$root/tests/crypto_native_test.c" "$work/native-crypto"/*.c \
+    ${SODIUM_LIBS:--l:libsodium.so.23} -o "$work/native-crypto-test"
+"$work/native-crypto-test"
+
 "$compiler" --no-main --root "$root/tests" \
     --module-path "$root" --module-path "$ziran/std" \
     -o "$work/async" "$root/tests/async_behavior.zi"
