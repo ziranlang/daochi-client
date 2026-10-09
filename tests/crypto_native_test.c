@@ -1,4 +1,4 @@
-#include "crypto_native.h"
+#include "crypto_native_api.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -37,24 +37,24 @@ int main(void)
         unsigned long long written = 0;
         assert(crypto_aead_xchacha20poly1305_ietf_encrypt(reference, &written,
             plain, size, aad, sizeof aad, NULL, nonce, key) == 0);
-        assert(Seal(bytes(plain, size), bytes(aad, sizeof aad), bytes(key, 32),
+        assert(ContentSeal(bytes(plain, size), bytes(aad, sizeof aad), bytes(key, 32),
             bytes(nonce, 24), bytes(sealed, size + 16)) == (int64_t)(size + 16));
         assert(written == size + 16 && memcmp(reference, sealed, size + 16) == 0);
-        assert(Open(bytes(reference, size + 16), bytes(aad, sizeof aad), bytes(key, 32),
+        assert(ContentOpen(bytes(reference, size + 16), bytes(aad, sizeof aad), bytes(key, 32),
             bytes(nonce, 24), bytes(opened, size)) == (int64_t)size);
         assert(memcmp(opened, plain, size) == 0);
-        assert(Digest(bytes(plain, size), bytes(hash, 32)));
+        assert(ContentDigest(bytes(plain, size), bytes(hash, 32)));
         assert(crypto_hash_sha256(reference_hash, plain, size) == 0);
         assert(memcmp(hash, reference_hash, 32) == 0);
-        assert(HmacSha256(bytes(plain, size), bytes(key, 32), bytes(hash, 32)));
+        assert(ContentHmacSha256(bytes(plain, size), bytes(key, 32), bytes(hash, 32)));
         assert(crypto_auth_hmacsha256(reference_hash, plain, size, key) == 0);
         assert(memcmp(hash, reference_hash, 32) == 0);
-        unsigned char *state = malloc(DigestStateBytes());
-        assert(state && DigestStart(bytes(state, DigestStateBytes())));
+        unsigned char *state = malloc(ContentDigestStateBytes());
+        assert(state && ContentDigestStart(bytes(state, ContentDigestStateBytes())));
         size_t middle = size / 2;
-        assert(DigestUpdate(bytes(state, DigestStateBytes()), bytes(plain, middle)));
-        assert(DigestUpdate(bytes(state, DigestStateBytes()), bytes(plain + middle, size - middle)));
-        assert(DigestFinish(bytes(state, DigestStateBytes()), bytes(hash, 32)));
+        assert(ContentDigestUpdate(bytes(state, ContentDigestStateBytes()), bytes(plain, middle)));
+        assert(ContentDigestUpdate(bytes(state, ContentDigestStateBytes()), bytes(plain + middle, size - middle)));
+        assert(ContentDigestFinish(bytes(state, ContentDigestStateBytes()), bytes(hash, 32)));
         assert(crypto_hash_sha256(reference_hash, plain, size) == 0);
         assert(memcmp(hash, reference_hash, 32) == 0);
         free(state);
@@ -64,7 +64,7 @@ int main(void)
             if (mutation == 1) aad[0] ^= 1;
             if (mutation == 2) key[0] ^= 1;
             if (mutation == 3) nonce[0] ^= 1;
-            assert(Open(bytes(sealed, size + 16), bytes(aad, sizeof aad), bytes(key, 32),
+            assert(ContentOpen(bytes(sealed, size + 16), bytes(aad, sizeof aad), bytes(key, 32),
                 bytes(nonce, 24), bytes(opened, size)) == -1);
             for (size_t i = 0; i < size; i++) assert(opened[i] == 0);
             if (mutation == 0) sealed[size + 15] ^= 1;
@@ -72,34 +72,34 @@ int main(void)
             if (mutation == 2) key[0] ^= 1;
             if (mutation == 3) nonce[0] ^= 1;
         }
-        assert(Seal(bytes(plain, size), bytes(aad, sizeof aad), bytes(key, 31),
+        assert(ContentSeal(bytes(plain, size), bytes(aad, sizeof aad), bytes(key, 31),
             bytes(nonce, 24), bytes(sealed, size + 16)) == -1);
-        assert(Seal(bytes(plain, size), bytes(aad, sizeof aad), bytes(key, 32),
+        assert(ContentSeal(bytes(plain, size), bytes(aad, sizeof aad), bytes(key, 32),
             bytes(nonce, 23), bytes(sealed, size + 16)) == -1);
-        assert(Seal(bytes(plain, size), bytes(aad, sizeof aad), bytes(key, 32),
+        assert(ContentSeal(bytes(plain, size), bytes(aad, sizeof aad), bytes(key, 32),
             bytes(nonce, 24), bytes(sealed, size + 15)) == -1);
         free(plain); free(sealed); free(reference); free(opened);
     }
-    assert(Open(bytes(key, 15), bytes(NULL, 0), bytes(key, 32), bytes(nonce, 24), bytes(hash, 32)) == -1);
+    assert(ContentOpen(bytes(key, 15), bytes(NULL, 0), bytes(key, 32), bytes(nonce, 24), bytes(hash, 32)) == -1);
     for (size_t i = 0; i < sizeof hash; i++) assert(hash[i] == 0);
-    assert(!DigestStart(bytes(key, 1)));
-    assert(!Digest(bytes(key, 32), bytes(hash, 31)));
-    assert(RandomBytes(bytes(hash, 32)));
-    Clear(bytes(hash, 32));
+    assert(!ContentDigestStart(bytes(key, 1)));
+    assert(!ContentDigest(bytes(key, 32), bytes(hash, 31)));
+    assert(ContentRandomBytes(bytes(hash, 32)));
+    ContentClear(bytes(hash, 32));
     for (size_t i = 0; i < sizeof hash; i++) assert(hash[i] == 0);
     unsigned char public_key[32], reference_public[32], private_key[64], signature[64], reference_signature[64];
     unsigned long long written = 0;
     assert(crypto_sign_seed_keypair(reference_public, private_key, key) == 0);
-    assert(DevicePublic(bytes(key, 32), bytes(public_key, 32)));
+    assert(ContentDevicePublic(bytes(key, 32), bytes(public_key, 32)));
     assert(memcmp(public_key, reference_public, 32) == 0);
     assert(crypto_sign_detached(reference_signature, &written, aad, sizeof aad, private_key) == 0);
-    assert(SignDevice(bytes(key, 32), bytes(aad, sizeof aad), bytes(signature, 64)));
+    assert(ContentSignDevice(bytes(key, 32), bytes(aad, sizeof aad), bytes(signature, 64)));
     assert(written == 64 && memcmp(signature, reference_signature, 64) == 0);
-    assert(!SignDevice(bytes(key, 31), bytes(aad, sizeof aad), bytes(signature, 64)));
+    assert(!ContentSignDevice(bytes(key, 31), bytes(aad, sizeof aad), bytes(signature, 64)));
     assert(crypto_pwhash(reference_hash, 32, (const char *)key, 32, nonce, 1, 8192, 2) == 0);
-    assert(DerivePassword(bytes(key, 32), bytes(nonce, 16), bytes(hash, 32), 1, 8192));
+    assert(ContentDerivePassword(bytes(key, 32), bytes(nonce, 16), bytes(hash, 32), 1, 8192));
     assert(memcmp(hash, reference_hash, 32) == 0);
-    assert(!DerivePassword(bytes(key, 32), bytes(nonce, 15), bytes(hash, 32), 1, 8192));
+    assert(!ContentDerivePassword(bytes(key, 32), bytes(nonce, 15), bytes(hash, 32), 1, 8192));
     for (size_t i = 0; i < sizeof hash; i++) assert(hash[i] == 0);
     puts("Daochi native content crypto matches released blobs and rejects changed context/key/nonce/tag");
     return 0;
