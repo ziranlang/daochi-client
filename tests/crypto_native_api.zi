@@ -1,0 +1,44 @@
+// C test exports only; production primitives retain package-scoped symbols.
+#import "crypto_native"
+
+#program_export
+ContentInitialize :: () -> bool { return Initialize() }
+
+#program_export
+ContentClear :: (data: []u8) -> void { Clear(data) }
+
+#program_export
+ContentRandomBytes :: (data: []u8) -> bool { return RandomBytes(data) }
+
+#program_export
+ContentDigest :: (data: []u8, output: []u8) -> bool { return Digest(data, output) }
+
+#program_export
+ContentHmacSha256 :: (data: []u8, key: []u8, output: []u8) -> bool { return HmacSha256(data, key, output) }
+
+#program_export
+ContentSeal :: (data: []u8, aad: []u8, key: []u8, nonce: []u8, output: []u8) -> s64 { return Seal(data, aad, key, nonce, output) }
+
+#program_export
+ContentOpen :: (data: []u8, aad: []u8, key: []u8, nonce: []u8, output: []u8) -> s64 { return Open(data, aad, key, nonce, output) }
+
+#program_export
+ContentDigestStateBytes :: () -> usize { return DigestStateBytes() }
+
+#program_export
+ContentDigestStart :: (state: []u8) -> bool { return DigestStart(state) }
+
+#program_export
+ContentDigestUpdate :: (state: []u8, data: []u8) -> bool { return DigestUpdate(state, data) }
+
+#program_export
+ContentDigestFinish :: (state: []u8, output: []u8) -> bool { return DigestFinish(state, output) }
+
+#program_export
+ContentDerivePassword :: (password: []u8, salt: []u8, output: []u8, operations: u64, memory: usize) -> bool { return DerivePassword(password, salt, output, operations, memory) }
+
+#program_export
+ContentDevicePublic :: (seed: []u8, output: []u8) -> bool { return DevicePublic(seed, output) }
+
+#program_export
+ContentSignDevice :: (seed: []u8, data: []u8, output: []u8) -> bool { return SignDevice(seed, data, output) }

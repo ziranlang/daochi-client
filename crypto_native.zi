@@ -33,31 +33,25 @@ Valid :: (input: []u8, aad: []u8, key: []u8, nonce: []u8) -> bool {
 }
 
 #scope_export
-#program_export
 Initialize :: () -> bool { return InitializeRaw() >= 0 }
-#program_export
 Clear :: (bytes: []u8) {
     if Fits(bytes) && bytes.count > 0 {
         ClearRaw(cast(*void)*bytes[0], cast(usize)bytes.count)
     }
 }
-#program_export
 RandomBytes :: (bytes: []u8) -> bool {
     if !Fits(bytes) || InitializeRaw() < 0 { return false }
     if bytes.count > 0 { RandomRaw(cast(*void)*bytes[0], cast(usize)bytes.count) }
     return true
 }
-#program_export
 Digest :: (input: []u8, output: []u8) -> bool {
     return Fits(input) && output.count == 32 && InitializeRaw() >= 0 &&
         DigestRaw(*output[0], Start(input), cast(u64)input.count) == 0
 }
-#program_export
 HmacSha256 :: (input: []u8, key: []u8, output: []u8) -> bool {
     return Fits(input) && key.count == 32 && output.count == 32 && InitializeRaw() >= 0 &&
         HmacRaw(*output[0], Start(input), cast(u64)input.count, *key[0]) == 0
 }
-#program_export
 Seal :: (input: []u8, aad: []u8, key: []u8, nonce: []u8, output: []u8) -> s64 {
     if !Valid(input, aad, key, nonce) || !Fits(output) || output.count < 16 || input.count > output.count - 16 {
         return -1
@@ -70,7 +64,6 @@ Seal :: (input: []u8, aad: []u8, key: []u8, nonce: []u8, output: []u8) -> s64 {
     }
     return cast(s64)size
 }
-#program_export
 Open :: (sealed: []u8, aad: []u8, key: []u8, nonce: []u8, output: []u8) -> s64 {
     if !Valid(sealed, aad, key, nonce) || sealed.count < 16 || !Fits(output) || output.count < sealed.count - 16 {
         Clear(output)
@@ -84,26 +77,21 @@ Open :: (sealed: []u8, aad: []u8, key: []u8, nonce: []u8, output: []u8) -> s64 {
     }
     return cast(s64)size
 }
-#program_export
 DigestStateBytes :: () -> usize { return StateBytesRaw() }
-#program_export
 DigestStart :: (state: []u8) -> bool {
     return Fits(state) && state.count >= cast(s64)StateBytesRaw() && InitializeRaw() >= 0 &&
         DigestStartRaw(cast(*void)*state[0]) == 0
 }
-#program_export
 DigestUpdate :: (state: []u8, input: []u8) -> bool {
     return Fits(state) && state.count >= cast(s64)StateBytesRaw() && Fits(input) &&
         DigestUpdateRaw(cast(*void)*state[0], Start(input), cast(u64)input.count) == 0
 }
-#program_export
 DigestFinish :: (state: []u8, output: []u8) -> bool {
     return Fits(state) && state.count >= cast(s64)StateBytesRaw() && output.count == 32 &&
         DigestFinishRaw(cast(*void)*state[0], *output[0]) == 0
 }
 // Compatibility KDF for existing Argon2id-protected exports. The caller owns
 // the container format and supplies its fixed, trusted work factors.
-#program_export
 DerivePassword :: (password: []u8, salt: []u8, output: []u8, operations: u64, memory: usize) -> bool {
     if !Fits(password) || salt.count != 16 || output.count != 32 || operations < 1 || memory < 8192 || InitializeRaw() < 0 {
         Clear(output)
@@ -115,14 +103,12 @@ DerivePassword :: (password: []u8, salt: []u8, output: []u8, operations: u64, me
     }
     return true
 }
-#program_export
 DevicePublic :: (seed: []u8, output: []u8) -> bool {
     if seed.count != 32 || output.count != 32 || !Initialize() { return false }
     private_key: [64]u8
     defer { Clear(private_key[:]) }
     return DeviceKeysRaw(*output[0], *private_key[0], *seed[0]) == 0
 }
-#program_export
 SignDevice :: (seed: []u8, input: []u8, output: []u8) -> bool {
     if seed.count != 32 || output.count != 64 || !Fits(input) || !Initialize() { return false }
     private_key: [64]u8
