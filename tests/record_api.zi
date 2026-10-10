@@ -1,0 +1,30 @@
+// C test exports only; production record sealing keeps package-scoped symbols.
+#import "record"
+
+Metadata :: (account_id: string, app_id: string, collection: string, id: string, schema: string) -> RecordMetadata {
+    metadata: RecordMetadata
+    metadata.account_id = account_id; metadata.app_id = app_id; metadata.collection = collection
+    metadata.id = id; metadata.schema = schema
+    return metadata
+}
+
+#program_export
+RecordTestAAD :: (account_id: string, app_id: string, collection: string, id: string, schema: string,
+    output: []u8) -> s64 {
+    return BuildRecordAAD(Metadata(account_id, app_id, collection, id, schema), output)
+}
+
+#program_export
+RecordTestEnvelopeBytes :: (account_id: string, app_id: string, collection: string, id: string, schema: string,
+    key_id: string, plain_count: s64) -> s64 {
+    return RecordEnvelopeBytes(Metadata(account_id, app_id, collection, id, schema), key_id, plain_count)
+}
+
+#program_export
+RecordTestSeal :: (account_id: string, app_id: string, collection: string, id: string, schema: string,
+    key_id: string, key: []u8, plaintext: []u8, nonce: []u8, output: []u8) -> s64 {
+    return SealRecord(Metadata(account_id, app_id, collection, id, schema), key_id, key, plaintext, nonce, output)
+}
+
+#program_export
+RecordTestBase64 :: (input: []u8, output: []u8) -> s64 { return RecordBase64(input, output) }
