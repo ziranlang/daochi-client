@@ -148,6 +148,25 @@ PrepareDeviceRegistration :: (client: Client, session: *Session,
 PrepareSyncHeader :: (client: Client, session: *Session, device: Device,
     now: s64, random_context: *void, random: RandomNonce,
     body: string, transaction_header: []u8) -> AuthResult {
+    return PrepareRequestHeader(client, session, device, now,
+        random_context, random, "POST", "/api/v1/sync", body,
+        transaction_header)
+}
+
+// Binary bodies and empty GET/HEAD bodies retain their exact byte length.
+// Both platform hosts and sync orchestration use the same signed preparation.
+#scope_export
+PrepareRequestHeader :: (client: Client, session: *Session, device: Device,
+    now: s64, random_context: *void, random: RandomNonce,
+    method: string, path: string, body: string,
+    transaction_header: []u8) -> AuthResult {
+    if transaction_header.count == 0 {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    transaction_header[0] = cast(u8)0
+    if session == null || random == null || client.digest == null {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
     tx_id: [65]u8
     nonce: [65]u8
     body_hash: [65]u8
@@ -169,8 +188,28 @@ PrepareSyncHeader :: (client: Client, session: *Session, device: Device,
     transaction.nonce = TextUntilNul(nonce[:])
     transaction.body_sha256_hex = TextUntilNul(body_hash[:])
     transaction.expires_at = server_now + 300
-    message: [1024]u8
-    if !BuildSyncTransactionMessage(transaction, message[:]) {
+    return SignTransactionHeader(client, device, transaction, method, path,
+        transaction_header)
+}
+
+// Hosts that stream and hash a body themselves supply the finished digest and
+// expiration. The client owns the account/device signatures and wire format.
+#scope_export
+SignTransactionHeader :: (client: Client, device: Device,
+    transaction: SyncTransaction, method: string, path: string,
+    transaction_header: []u8) -> AuthResult {
+    if transaction_header.count == 0 {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    transaction_header[0] = cast(u8)0
+    if client.signer == null || device.signer == null ||
+        transaction.account_id != client.identity.account_id ||
+        transaction.app_id != client.app_id ||
+        transaction.device_key_id != device.key_id {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    message: [4096]u8
+    if !BuildTransactionMessage(transaction, method, path, message[:]) {
         return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
     }
     account_signature: [4841]u8
@@ -183,7 +222,7 @@ PrepareSyncHeader :: (client: Client, session: *Session, device: Device,
         !SignatureHex(TextUntilNul(device_signature[:]), 128) {
         return cast(AuthResult)AuthResult.AUTH_SIGN_FAILED
     }
-    if !BuildSyncTransactionHeader(transaction,
+    if !BuildTransactionHeader(transaction, method, path,
         TextUntilNul(account_signature[:]),
         TextUntilNul(device_signature[:]),
         transaction_header) {
