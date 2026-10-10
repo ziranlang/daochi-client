@@ -85,3 +85,12 @@ registration message construction compile and run as portable `.zib`. The
 full HTTP client is **not yet a `.zib` bundle**: host transport, digest, and
 signer callbacks need bundle capabilities. Native Linux integration is tested;
 browser and Android transports remain application host work.
+
+`sync.PrepareRequestHeader` prepares the same account/device signed v6
+transaction for an exact HTTP method, path and byte-counted body, including
+empty GET/HEAD bodies and binary blob uploads. Hosts that already stream and
+hash the body can use `sync.SignTransactionHeader` with an explicit
+`transaction.SyncTransaction`; its account, app and device must match the
+supplied client. `PrepareSyncHeader` retains the existing POST sync behavior.
+The host still owns transport, pinned-node policy, session/key storage and
+remote acknowledgment handling.
