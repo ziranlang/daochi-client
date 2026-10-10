@@ -24,6 +24,9 @@ The protocol modules currently provide:
 - canonical device registration and protocol v6 transaction messages
   (`transaction.zi`);
 - signed device registration and protocol v6 sync requests (`sync.zi`);
+- encrypted record profile v1 (`daochi-record-v1`) envelopes with canonical
+  authenticated metadata and fresh XChaCha20-Poly1305 nonces (`record.zi`,
+  native; link libsodium);
 - polled login, bearer requests, and signed sync operations
   (`async_client.zi`, `async_sync.zi`);
 - alias and friend requests, actions, lists, and stats (`social.zi`);

@@ -50,6 +50,15 @@ done
     ${SODIUM_LIBS:--l:libsodium.so.23} -o "$work/native-crypto-test"
 "$work/native-crypto-test"
 
+"$compiler" --no-main --root "$root/tests" --module-path "$root" --module-path "$ziran/std" \
+    -o "$work/record" "$root/tests/record_api.zi"
+"${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror \
+    -Wno-unused-function -Wno-unused-variable \
+    -I"$ziran/include" -I"$work/record" \
+    "$root/tests/record_test.c" "$work/record"/*.c \
+    ${SODIUM_LIBS:--l:libsodium.so.23} -o "$work/record-test"
+"$work/record-test"
+
 "$compiler" --no-main --root "$root/tests" \
     --module-path "$root" --module-path "$ziran/std" \
     -o "$work/async" "$root/tests/async_behavior.zi"

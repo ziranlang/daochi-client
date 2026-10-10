@@ -1,0 +1,144 @@
+// Daochi encrypted record profile v1 ("daochi-record-v1"). The caller supplies
+// the content key and the authoritative routing metadata; this module only
+// seals. Keys and plaintext never leave the caller's buffers.
+#scope_module
+#import "wire"
+#import "byte_text_linux"
+Native :: #import "crypto_native";
+sodium :: #system_library "sodium";
+c :: #system_library "c";
+Base64Raw :: (output: *u8, capacity: usize, input: *u8, count: usize, variant: s32) -> *u8 #foreign sodium "sodium_bin2base64";
+Allocate :: (bytes: usize) -> *void #foreign c "malloc";
+Release :: (bytes: *void) #foreign c "free";
+UrlSafeNoPadding :: 7
+
+// Metadata bytes are the associated data, so every implementation must emit
+// the same JSON. Restricting values to unescaped ASCII keeps it canonical.
+Plain :: (value: string, minimum: s64, maximum: s64) -> bool {
+    if value.count < minimum || value.count > maximum { return false }
+    for byte: value {
+        if !((byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) ||
+            byte == 45 || byte == 46 || byte == 58 || byte == 95) { return false }
+    }
+    return true
+}
+Account :: (value: string) -> bool {
+    if value.count != 64 { return false }
+    for byte: value { if !((byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)) { return false } }
+    return true
+}
+Field :: (writer: Writer, name: string, value: string, last: bool) -> Writer {
+    result := AppendJsonQuoted(writer, name)
+    result = WriteByte(result, 58)
+    result = AppendJsonQuoted(result, value)
+    return ifx last then result else WriteByte(result, 44)
+}
+Base64Size :: (count: s64) -> s64 {
+    remainder := count % 3
+    return count / 3 * 4 + (ifx remainder == 0 then 0 else remainder + 1)
+}
+WriteBase64 :: (writer: Writer, bytes: []u8) -> Writer {
+    result := writer
+    size := Base64Size(bytes.count)
+    if !result.valid || result.cursor < 0 || size + 1 > result.output.count - result.cursor {
+        result.valid = false
+        return result
+    }
+    if Base64Raw(*result.output[result.cursor], cast(usize)(size + 1),
+        ifx bytes.count > 0 then *bytes[0] else null, cast(usize)bytes.count, UrlSafeNoPadding) == null {
+        result.valid = false
+        return result
+    }
+    result.cursor += size
+    return result
+}
+
+#scope_export
+RecordMetadata :: struct {
+    account_id: string
+    app_id: string
+    collection: string
+    id: string
+    schema: string
+}
+RecordNonceBytes :: 24
+RecordPlainMaximum :: 8388608
+
+RecordMetadataValid :: (metadata: RecordMetadata) -> bool {
+    return Account(metadata.account_id) && Plain(metadata.app_id, 1, 64) &&
+        Plain(metadata.collection, 1, 128) && Plain(metadata.id, 1, 256) && Plain(metadata.schema, 1, 128)
+}
+
+// {"account_id":…,"app_id":…,"collection":…,"id":…,"schema":…}; the length
+// excludes the terminating NUL, or -1 when invalid or too large.
+BuildRecordAAD :: (metadata: RecordMetadata, output: []u8) -> s64 {
+    if output.count < 1 || !RecordMetadataValid(metadata) { return -1 }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteByte(writer, 123)
+    writer = Field(writer, "account_id", metadata.account_id, false)
+    writer = Field(writer, "app_id", metadata.app_id, false)
+    writer = Field(writer, "collection", metadata.collection, false)
+    writer = Field(writer, "id", metadata.id, false)
+    writer = Field(writer, "schema", metadata.schema, true)
+    writer = WriteByte(writer, 125)
+    return ifx writer.valid then writer.cursor else -1
+}
+
+// Room for the sealed envelope of plain_count bytes, including its NUL.
+RecordEnvelopeBytes :: (metadata: RecordMetadata, key_id: string, plain_count: s64) -> s64 {
+    aad: [1024]u8
+    length := BuildRecordAAD(metadata, aad[:])
+    if length < 0 || !Plain(key_id, 1, 128) || plain_count < 0 || plain_count > RecordPlainMaximum { return -1 }
+    return length + key_id.count + Base64Size(plain_count + 16) + Base64Size(RecordNonceBytes) + 112
+}
+
+// Seal with a fresh random nonce into the profile's sorted-key JSON envelope:
+// {"aad":{…},"alg":"xchacha20poly1305","ciphertext":"…","key_id":"…",
+// "nonce":"…","profile":"daochi-record-v1"}, base64url without padding.
+// The nonce is also returned because record stores repeat it. Returns the
+// envelope length without its NUL, or -1 with every output cleared.
+SealRecord :: (metadata: RecordMetadata, key_id: string, key: []u8, plaintext: []u8,
+    nonce: []u8, output: []u8) -> s64 {
+    needed := RecordEnvelopeBytes(metadata, key_id, plaintext.count)
+    if needed < 0 || key.count != 32 || nonce.count != RecordNonceBytes || output.count < needed { return -1 }
+    aad: [1024]u8
+    aad_count := BuildRecordAAD(metadata, aad[:])
+    sealed_count := plaintext.count + 16
+    pointer := cast(*u8)Allocate(cast(usize)sealed_count)
+    if pointer == null { return -1 }
+    sealed := BytesFromPointer(pointer, cast(u64)sealed_count)
+    defer { Native.Clear(sealed); Release(cast(*void)pointer) }
+    if !Native.RandomBytes(nonce) ||
+        Native.Seal(plaintext, aad[:aad_count], key, nonce, sealed) != sealed_count {
+        Native.Clear(nonce)
+        return -1
+    }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteText(writer, "{\"aad\":")
+    writer = WriteText(writer, TextFromBytes(aad[:aad_count]))
+    writer = WriteText(writer, ",\"alg\":\"xchacha20poly1305\",\"ciphertext\":\"")
+    writer = WriteBase64(writer, sealed)
+    writer = WriteText(writer, "\",\"key_id\":")
+    writer = AppendJsonQuoted(writer, key_id)
+    writer = WriteText(writer, ",\"nonce\":\"")
+    writer = WriteBase64(writer, nonce)
+    writer = WriteText(writer, "\",\"profile\":\"daochi-record-v1\"}")
+    if !writer.valid {
+        Native.Clear(nonce)
+        Native.Clear(output)
+        return -1
+    }
+    return writer.cursor
+}
+
+// Base64url without padding, as the profile encodes nonces and ciphertext.
+// Returns the length without its NUL, or -1 when output is too small.
+RecordBase64 :: (input: []u8, output: []u8) -> s64 {
+    if output.count < 1 { return -1 }
+    output[0] = 0
+    writer: Writer = .{output, 0, true}
+    writer = WriteBase64(writer, input)
+    return ifx writer.valid then writer.cursor else -1
+}
