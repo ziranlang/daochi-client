@@ -151,6 +151,13 @@ CopySigningText :: (value: string, output: []u8) -> bool {
 #program_export
 SignAccountKeysHex :: (account: *AccountKeys, message: *u8,
     message_length: s64, output: *u8, output_size: s64) -> s32 {
+    // The decoded private key and raw signature never outlive the call.
+    private_key: [AccountSigningKeyBytes]u8
+    signature: [AccountSignatureBytes]u8
+    defer {
+        SecureWipe(*private_key[0], AccountSigningKeyBytes)
+        SecureWipe(*signature[0], AccountSignatureBytes)
+    }
     if output == null || output_size <= 0 {
         return 0
     }
@@ -161,13 +168,11 @@ SignAccountKeysHex :: (account: *AccountKeys, message: *u8,
     message_length < 0 || (message == null && message_length > 0) {
         return 0
     }
-    private_key: [AccountSigningKeyBytes]u8
     private_text := AccountBufferText(*account.private_key_hex[0],
         ACCOUNT_PRIVATE_KEY_HEX_SIZE)
     if HexToBytes(private_text, *private_key[0], AccountSigningKeyBytes) == 0 {
         return 0
     }
-    signature: [AccountSignatureBytes]u8
     if MlDsa44Sign(signature[:], BytesFromPointer(message,
         cast(u64)message_length), private_key[:]) != AccountSignatureBytes {
         return 0
@@ -514,6 +519,12 @@ AccountKeysEncryptedText :: (account: *AccountKeys,
     nonce: [AccountEncryptedNonceBytes]u8
     key: [32]u8
     sealed: [ACCOUNT_EXPORT_TEXT_SIZE + AccountEncryptedTagBytes]u8
+    // The plain key file, its key and the sealed copy leave no trace.
+    defer {
+        SecureWipe(*plaintext[0], ACCOUNT_EXPORT_TEXT_SIZE)
+        SecureWipe(*key[0], 32)
+        SecureWipe(*sealed[0], ACCOUNT_EXPORT_TEXT_SIZE + AccountEncryptedTagBytes)
+    }
     if AccountKeysText(account, *plaintext[0],
         ACCOUNT_EXPORT_TEXT_SIZE) == 0 {
         return 0
@@ -585,6 +596,11 @@ ParseEncryptedAccountKeys :: (body: string,
     key: [32]u8
     sealed: [ACCOUNT_EXPORT_TEXT_SIZE]u8
     plaintext: [ACCOUNT_EXPORT_TEXT_SIZE]u8
+    defer {
+        SecureWipe(*plaintext[0], ACCOUNT_EXPORT_TEXT_SIZE)
+        SecureWipe(*key[0], 32)
+        SecureWipe(*sealed[0], ACCOUNT_EXPORT_TEXT_SIZE)
+    }
     sealed_length := sealed_text.count / 2
     plain_length := sealed_length - AccountEncryptedTagBytes
     if HexToBytes(salt_text, *salt[0], AccountEncryptedSaltBytes) == 0 ||

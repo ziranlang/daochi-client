@@ -114,6 +114,24 @@ env -u DISPLAY -u WAYLAND_DISPLAY "$work/keys_test"
 env -u DISPLAY -u WAYLAND_DISPLAY "$work/keys-c-test"
 echo 'Daochi account keys, key files, and cryptography passed'
 
+"$compiler" --no-main --root "$root/tests" --module-path "$root" --module-path "$ziran/std" \
+    --module-path "oqs=$oqs/src" -o "$work/keys-wipe" "$root/tests/keys_wipe_behavior.zi"
+cat > "$work/keys-wipe/main.c" <<'C'
+#include "keys_wipe_behavior.h"
+#include <stdio.h>
+void __real_Cleanse(Slice memory);
+void __wrap_Cleanse(Slice memory) { __real_Cleanse(memory); ObservedWipe((uint8_t *)memory.data, (int64_t)memory.length); }
+int main(void) {
+    int result = Check();
+    if (result) fprintf(stderr, "key wipe check failed with code %d\n", result);
+    return result ? 1 : 0;
+}
+C
+"${CC:-cc}" -std=c11 -O0 -ffunction-sections -fdata-sections -I"$ziran/include" -I"$work/keys-wipe" \
+    "$work/keys-wipe"/*.c "$liboqs" -Wl,--gc-sections -Wl,--wrap=Cleanse -o "$work/keys-wipe-test"
+env -u DISPLAY -u WAYLAND_DISPLAY "$work/keys-wipe-test"
+echo 'Daochi account key signing and key files wipe their secrets'
+
 # Shared canonical server fixture and actual recipient-bound key envelopes.
 "$compiler" --no-main --root "$root" --module-path "$ziran/std" \
     --module-path "oqs=$oqs/src" -o "$work/authorization" \
