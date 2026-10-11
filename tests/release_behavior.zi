@@ -1,0 +1,89 @@
+#import "release"
+#import "byte_text_linux"
+#import "vec"
+
+KEY :: "1111111111111111111111111111111111111111111111111111111111111111"
+SIGNATURE :: "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab"
+HASH_A :: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+HASH_B :: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+signed_message: [4096]u8;
+signed_length: s64;
+signed_key: u8;
+verify_calls: s32;
+
+// Records the signed message; the signature holds only 0xab bytes.
+Verify :: (signature: *u8, public_key: *u8, message: *u8, length: usize) -> bool {
+    verify_calls += 1
+    signed_length = cast(s64)length
+    signed_key = public_key[0]
+    for index: cast(s64)0..signed_length - 1 {
+        signed_message[index] = message[index]
+    }
+    for index: 0..63 {
+        if signature[index] != 0xab {
+            return false
+        }
+    }
+    return true
+}
+
+Release :: (version: string, dependencies: string) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out, "{\"app_id\":\"root\",\"sequence\":18,\"version\":\"%\",\"runtime\":\"kryon-app-v1\",", version)
+    BuilderPrint(*out, "\"host_api\":9,\"module_api\":3,\"data_schema\":0,\"key_id\":\"inbe-2026-10\",\"signature\":\"%\",", SIGNATURE)
+    BuilderPrint(*out, "\"artifacts\":[{\"variant\":\"module\",\"sha256\":\"%\",\"size\":4096}],", HASH_A)
+    BuilderPrint(*out, "\"dependencies\":[%]}", dependencies)
+    return BuilderFinish(out)
+}
+
+Dependency :: (app: string, size: string) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out, "{\"app_id\":\"%\",\"version\":\"1.3.4\",\"sha256\":\"%\",\"size\":%}", app, HASH_B, size)
+    return BuilderFinish(out)
+}
+
+Pair :: (first: string, second: string) -> string {
+    out: Vec(u8)
+    BuilderPrint(*out, "%,%", first, second)
+    return BuilderFinish(out)
+}
+
+#program_export
+main :: () -> s32 {
+    lumi := Dependency("lumi", "900")
+    diary := Dependency("diary", "800")
+    json := Release("2.1.21", Pair(diary, lumi))
+    release := DaochiParseRelease(json, KEY, 1048576, Verify)
+    if !release.valid || release.sequence != 18 || TextFromCString(*release.app_id[0]) != "root" ||
+    release.artifact_count != 1 || release.artifacts[0].size != 4096 || release.dependency_count != 2 ||
+    TextFromCString(*release.dependencies[1].app_id[0]) != "lumi" || release.dependencies[0].size != 800 ||
+    signed_key != 0x11 {
+        return 1
+    }
+    message: Vec(u8)
+    BuilderPrint(*message, "daochi-zib-release-v2\nroot\n18\n2.1.21\nkryon-app-v1\n9\n3\n0\ninbe-2026-10\n1\nmodule\n%\n4096\n", HASH_A)
+    BuilderPrint(*message, "2\ndiary\n1.3.4\n%\n800\nlumi\n1.3.4\n%\n900\n", HASH_B, HASH_B)
+    expected := BuilderFinish(message)
+    if TextFromBytes(signed_message[0:signed_length]) != expected {
+        return 2
+    }
+    // Unsorted or repeated dependencies, a bad version, an oversized artifact
+    // and a wrong signature each fail.
+    if DaochiParseRelease(Release("2.1.21", Pair(lumi, diary)), KEY, 1048576, Verify).valid ||
+    DaochiParseRelease(Release("2.1.21", Pair(lumi, lumi)), KEY, 1048576, Verify).valid ||
+    DaochiParseRelease(Release("2.01.21", diary), KEY, 1048576, Verify).valid ||
+    DaochiParseRelease(Release("2.1.21", diary), KEY, 2048, Verify).valid ||
+    DaochiParseRelease(Release("2.1.21", Dependency("Lumi", "900")), KEY, 1048576, Verify).valid {
+        return 3
+    }
+    calls := verify_calls
+    if DaochiParseRelease(Release("2.1.21", diary), "abc", 1048576, Verify).valid || verify_calls != calls {
+        return 4
+    }
+    if !DaochiSha256Matches("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") ||
+    DaochiSha256Matches("abd", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
+        return 5
+    }
+    return 0
+}

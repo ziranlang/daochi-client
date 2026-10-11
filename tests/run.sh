@@ -41,6 +41,13 @@ for test in wire auth url client transaction sync social account events; do
     env -u DISPLAY -u WAYLAND_DISPLAY "$work/${test}_test"
 done
 
+# Signed release parsing: canonical message, ordering and bounds.
+"$compiler" --no-main --root "$root/tests" --module-path "$root" --module-path "$ziran/std" \
+    -o "$work/release" "$root/tests/release_behavior.zi"
+"${CC:-cc}" -std=c11 -O1 -I"$ziran/include" -I"$work/release" "$work/release"/*.c -o "$work/release-test"
+"$work/release-test"
+echo 'Daochi signed release parsing passed'
+
 # The portable SHA-256, HMAC, PBKDF2 and ChaCha20-Poly1305 against known answers.
 "$compiler" --no-main --root "$root" --module-path "$ziran/std" -o "$work/crypto" "$root/crypto.zi"
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror -I"$ziran/include" -I"$work/crypto" \
