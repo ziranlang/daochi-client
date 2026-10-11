@@ -105,6 +105,13 @@ fi
     "$work/keys"/*.c \
     "$liboqs" -o "$work/keys_test"
 env -u DISPLAY -u WAYLAND_DISPLAY "$work/keys_test"
+# Key files, signatures checked by liboqs itself, and truncated buffers.
+"$compiler" --no-main --root "$root" --module-path "$ziran/std" --module-path "oqs=$oqs/src" \
+    -o "$work/keys-c" "$root/keys.zi"
+"${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-function \
+    -I"$ziran/include" -I"$work/keys-c" -I"$(dirname "$liboqs")/../include" \
+    "$root/tests/keys_test.c" "$work/keys-c"/*.c "$liboqs" -o "$work/keys-c-test"
+env -u DISPLAY -u WAYLAND_DISPLAY "$work/keys-c-test"
 echo 'Daochi account keys, key files, and cryptography passed'
 
 # Shared canonical server fixture and actual recipient-bound key envelopes.
