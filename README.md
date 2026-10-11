@@ -18,6 +18,9 @@ It has no Kryon dependency and lives in the
 The protocol modules currently provide:
 
 - canonical challenge, login body, and signed message builders (`wire.zi`);
+- signed app releases (`daochi-zib-release-v2`): shape, ordering and bounds,
+  the canonical signed message, and the signature through the application's
+  own Ed25519 check (`release.zi`);
 - HTTPS and local network URL policy (`url.zi`);
 - challenge parsing, signed login preparation, and token parsing (`auth.zi`);
 - login and bearer requests with one fresh login after a `401` (`client.zi`);
