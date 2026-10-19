@@ -5,6 +5,7 @@
 #include "envelope.h"
 #include "json_scan.h"
 #include "crypto.h"
+#include "zir_string.h"
 
 #include <assert.h>
 #include <stdio.h>
