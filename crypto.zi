@@ -30,24 +30,30 @@ Sha256RotateRight :: (value: u32, bits: u32) -> u32 {
 }
 
 Sha256Transform :: (context: *Sha256Context) {
+    Sha256TransformBlock(context, *context.block[0])
+}
+
+// One 64-byte block, read where it lies, with the rotations written inline:
+// a call per rotation made hashing a package dominate a phone's startup.
+Sha256TransformBlock :: (context: *Sha256Context, block: *u8) {
     words: [64]u32
     index: s32 = 0
     while index < 16 {
         byte_index := index * 4
         words[index] =
-            (cast(u32)context.block[byte_index] << cast(u32)24) |
-            (cast(u32)context.block[byte_index + 1] << cast(u32)16) |
-            (cast(u32)context.block[byte_index + 2] << cast(u32)8) |
-            cast(u32)context.block[byte_index + 3]
+            (cast(u32)block[byte_index] << cast(u32)24) |
+            (cast(u32)block[byte_index + 1] << cast(u32)16) |
+            (cast(u32)block[byte_index + 2] << cast(u32)8) |
+            cast(u32)block[byte_index + 3]
         index += 1
     }
     while index < 64 {
         prior_15 := words[index - 15]
         prior_2 := words[index - 2]
-        sigma_0 := (Sha256RotateRight(prior_15, 7) ^
-            Sha256RotateRight(prior_15, 18) ^ (prior_15 >> cast(u32)3))
-        sigma_1 := (Sha256RotateRight(prior_2, 17) ^
-            Sha256RotateRight(prior_2, 19) ^ (prior_2 >> cast(u32)10))
+        sigma_0 := (((prior_15 >> cast(u32)7) | (prior_15 << cast(u32)25)) ^
+            ((prior_15 >> cast(u32)18) | (prior_15 << cast(u32)14)) ^ (prior_15 >> cast(u32)3))
+        sigma_1 := (((prior_2 >> cast(u32)17) | (prior_2 << cast(u32)15)) ^
+            ((prior_2 >> cast(u32)19) | (prior_2 << cast(u32)13)) ^ (prior_2 >> cast(u32)10))
         words[index] = (words[index - 16] + sigma_0 +
             words[index - 7] + sigma_1)
         index += 1
@@ -63,12 +69,12 @@ Sha256Transform :: (context: *Sha256Context) {
     h := context.state[7]
     index = 0
     while index < 64 {
-        sigma_1 := (Sha256RotateRight(e, 6) ^
-            Sha256RotateRight(e, 11) ^ Sha256RotateRight(e, 25))
+        sigma_1 := (((e >> cast(u32)6) | (e << cast(u32)26)) ^
+            ((e >> cast(u32)11) | (e << cast(u32)21)) ^ ((e >> cast(u32)25) | (e << cast(u32)7)))
         choose := (e & f) ^ ((~e) & g)
         temp_1 := (h + sigma_1 + choose + Sha256RoundConstants[index] + words[index])
-        sigma_0 := (Sha256RotateRight(a, 2) ^
-            Sha256RotateRight(a, 13) ^ Sha256RotateRight(a, 22))
+        sigma_0 := (((a >> cast(u32)2) | (a << cast(u32)30)) ^
+            ((a >> cast(u32)13) | (a << cast(u32)19)) ^ ((a >> cast(u32)22) | (a << cast(u32)10)))
         majority := (a & b) ^ (a & c) ^ (b & c)
         temp_2 := sigma_0 + majority
         h = g
@@ -107,6 +113,13 @@ Sha256Initialize :: (context: *Sha256Context) {
 Sha256Update :: (context: *Sha256Context, data: *u8, length: s64) {
     index: s64 = 0
     while index < length {
+        // Whole blocks are hashed where they lie instead of byte by byte.
+        if context.block_length == 0 && length - index >= 64 {
+            Sha256TransformBlock(context, *data[index])
+            context.bit_length += 512
+            index += 64
+            continue
+        }
         context.block[context.block_length] = data[index]
         context.block_length += 1
         if context.block_length == 64 {
