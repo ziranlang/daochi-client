@@ -127,11 +127,11 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
     if Contains(request.url, "/account/delete") {
         deletions += 1
         if request.method != "POST" || request.token.count != 0 ||
-            request.headers.count != 2 ||
-            request.headers[0].name != "X-Daochi-User" ||
-            request.headers[1].name != "X-Daochi-Signature" ||
-            request.headers[1].value.count != 4840 ||
-            !Contains(request.body, "\"public_key\":\"public-key\"") {
+        request.headers.count != 2 ||
+        request.headers[0].name != "X-Daochi-User" ||
+        request.headers[1].name != "X-Daochi-Signature" ||
+        request.headers[1].value.count != 4840 ||
+        !Contains(request.body, "\"public_key\":\"public-key\"") {
             bad_request = true
         }
         status = delete_status
@@ -143,7 +143,7 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
     if Contains(request.url, "/account/devices") {
         registrations += 1
         if !Contains(request.body, "\"app_id\":\"inbe\"") ||
-            !Contains(request.body, "\"expires_at\":1700000300") {
+        !Contains(request.body, "\"expires_at\":1700000300") {
             bad_request = true
         }
         return CopyCString("{}", output)
@@ -156,7 +156,7 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
             return CopyCString("", output)
         }
         if Contains(request.body, "bootstrap") || Contains(request.body, "full_sync_requested") ||
-            Contains(request.body, "last_server_state_hash") || request.headers.count != 3 {
+        Contains(request.body, "last_server_state_hash") || request.headers.count != 3 {
             bad_request = true
         }
         if flow_trial == 1 && flow_applied == 1 && flow_pages < 3 {
@@ -185,9 +185,9 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
         return writer.valid
     }
     if request.headers.count != 3 || request.headers[2].name != "X-Daochi-Tx" ||
-        !Contains(request.headers[2].value, "\"protocol_version\":6") ||
-        !Contains(request.headers[2].value, "\"device_signature\":\"dddd") ||
-        request.body != "{\"protocol_version\":6}" {
+    !Contains(request.headers[2].value, "\"protocol_version\":6") ||
+    !Contains(request.headers[2].value, "\"device_signature\":\"dddd") ||
+    request.body != "{\"protocol_version\":6}" {
         bad_request = true
     }
     if reject_syncs > 0 {
@@ -266,8 +266,9 @@ FlowSave :: (context: *void, state: *SyncPageState) -> bool {
     return true
 }
 
-FlowPrepare :: (context: *void) -> string {
+FlowPrepare :: (context: *void, maximum_records: s32) -> string {
     unused context
+    if maximum_records < 1 || maximum_records > 200 { bad_request = true }
     return "{\"protocol_version\":6,\"app_id\":\"inbe\",\"since_server_version\":0,\"encrypted_records\":[],\"bootstrap\":true,\"full_sync_requested\":true,\"last_server_state_hash\":\"hash\"}"
 }
 
@@ -302,7 +303,7 @@ CheckFlow :: (client: Client, device: Device, transport: AsyncTransport) -> s32 
         if steps >= 250 || bad_request || active || registrations != 1 { return 61 }
         if trial < 2 {
             if pending.result != cast(AuthResult)AuthResult.AUTH_OK || flow_applied != 20 ||
-                flow_bytes < 20000000 || flow_state.pending || flow_state.cursor[0] != cast(u8)0 {
+            flow_bytes < 20000000 || flow_state.pending || flow_state.cursor[0] != cast(u8)0 {
                 return 62 + trial
             }
         } else if pending.result != cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED {
@@ -326,7 +327,7 @@ CheckFlow :: (client: Client, device: Device, transport: AsyncTransport) -> s32 
             steps = 0
             while !PollSync(*pending) && steps < 250 { steps += 1 }
             if pending.result != cast(AuthResult)AuthResult.AUTH_OK || flow_applied != 20 ||
-                flow_state.pending { return 72 }
+            flow_state.pending { return 72 }
         }
         if trial == 4 && flow_applied != 1 { return 73 }
         trial += 1
@@ -377,13 +378,13 @@ main :: () -> s32 {
             limit += 1
         }
         if limit >= 30 || bad_request || active || registrations != 1 ||
-            device_signs != 1 || nonces != 3 {
+        device_signs != 1 || nonces != 3 {
             return 3
         }
         if trial == 0 {
             if pending.result != cast(AuthResult)AuthResult.AUTH_OK ||
-                pending.status != 200 || calls != 4 || account_signs != 3 ||
-                TextUntilNul(output[:]) != "{\"server_version\":7}" {
+            pending.status != 200 || calls != 4 || account_signs != 3 ||
+            TextUntilNul(output[:]) != "{\"server_version\":7}" {
                 return 4
             }
         } else {
@@ -407,7 +408,7 @@ main :: () -> s32 {
         Nonce, transport, "{\"protocol_version\":6}", output[:])
     CancelSync(*pending)
     if cancels != 1 || active || !PollSync(*pending) || bad_request ||
-        pending.result != cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED {
+    pending.result != cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED {
         return 8
     }
     trial = 0
@@ -421,8 +422,8 @@ main :: () -> s32 {
         }
         deletion: PendingDeletion
         if !BeginDeletion(*deletion, client, transport) ||
-            BeginDeletion(*deletion, client, transport) ||
-            PollDeletion(*deletion) || calls != 1 {
+        BeginDeletion(*deletion, client, transport) ||
+        PollDeletion(*deletion) || calls != 1 {
             return 9
         }
         steps: s32 = 0
@@ -430,8 +431,8 @@ main :: () -> s32 {
             steps += 1
         }
         if steps >= 10 || bad_request || active || calls != 2 ||
-            challenges != 1 || deletions != 1 || logins != 0 ||
-            account_signs != 1 {
+        challenges != 1 || deletions != 1 || logins != 0 ||
+        account_signs != 1 {
             return 10
         }
         expected := cast(AuthResult)AuthResult.AUTH_OK
@@ -458,7 +459,7 @@ main :: () -> s32 {
         CancelDeletion(*deletion)
         CancelDeletion(*deletion)
         if cancels != 1 || active || !PollDeletion(*deletion) ||
-            bad_request || deletion.result != cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED {
+        bad_request || deletion.result != cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED {
             return 12
         }
         trial += 1

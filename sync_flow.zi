@@ -12,7 +12,7 @@ SyncPageState :: struct {
 }
 
 LoadSyncState :: #type (context: *void, state: *SyncPageState) -> bool;
-PrepareSyncBody :: #type (context: *void) -> string;
+PrepareSyncBody :: #type (context: *void, maximum_records: s32) -> string;
 SaveSyncState :: #type (context: *void, state: *SyncPageState) -> bool;
 AcceptSyncPage :: #type (context: *void, response: string, next: *SyncPageState) -> bool;
 SyncClock :: #type (context: *void) -> s64;
@@ -44,7 +44,7 @@ SyncJsonValue :: (text: string, object_at: s32, name: string) -> string {
 SyncVersion :: (text: string, at: s32, value: *s64) -> bool {
     number := ReadNumber(text, at)
     if !number.valid || number.value < 0 || number.value > 9007199254740991.0 ||
-        cast(float64)cast(s64)number.value != number.value {
+    cast(float64)cast(s64)number.value != number.value {
         return false
     }
     value.* = cast(s64)number.value
@@ -53,9 +53,9 @@ SyncVersion :: (text: string, at: s32, value: *s64) -> bool {
 
 ReadRecordCursor :: (text: string, at: s32, out: *RecordCursor) -> bool {
     return at >= 0 && at < text.count && text[at] == cast(u8)123 &&
-        SyncVersion(text, FieldAt(text, at, "version"), *out.version) &&
-        ReadStringText(text, FieldAt(text, at, "collection"), out.collection[:]) > 0 &&
-        ReadStringText(text, FieldAt(text, at, "id"), out.id[:]) > 0
+    SyncVersion(text, FieldAt(text, at, "version"), *out.version) &&
+    ReadStringText(text, FieldAt(text, at, "collection"), out.collection[:]) > 0 &&
+    ReadStringText(text, FieldAt(text, at, "id"), out.id[:]) > 0
 }
 
 CompareSyncText :: (left: string, right: string) -> s32 {
@@ -147,7 +147,7 @@ AcceptSyncResponse :: (body: string, response: string, state: *SyncPageState,
     since: s64
     server: s64
     if !SyncVersion(body, FieldAt(body, 0, "since_server_version"), *since) ||
-        !SyncVersion(response, FieldAt(response, 0, "server_version"), *server) || server < since {
+    !SyncVersion(response, FieldAt(response, 0, "server_version"), *server) || server < since {
         return false
     }
     changes := FieldAt(response, 0, "changes")
@@ -176,9 +176,9 @@ AcceptSyncResponse :: (body: string, response: string, state: *SyncPageState,
     }
     following: RecordCursor
     if complete != "false" || ArrayCount(response, records) == 0 ||
-        !ReadRecordCursor(cursor, 0, *following) || following.version < since || following.version > server ||
-        (has_previous && !RecordCursorAfter(*following, *old)) ||
-        !CopyCString(cursor, next.cursor[:]) {
+    !ReadRecordCursor(cursor, 0, *following) || following.version < since || following.version > server ||
+    (has_previous && !RecordCursorAfter(*following, *old)) ||
+    !CopyCString(cursor, next.cursor[:]) {
         return false
     }
     next.pending = true

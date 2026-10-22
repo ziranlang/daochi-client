@@ -91,6 +91,9 @@ advance the account watermark. On restart the library resumes the saved cursor;
 cancel releases the current transfer and owned request memory. The host's `clock`
 callback refreshes transaction time between pages. These callbacks contain app
 storage policy, not page requests or transport retry decisions.
+`prepare` receives the maximum encrypted record count for the next upload,
+including any reduction after an oversized page. Retain its returned body until
+the next `prepare` call or completion.
 
 `sh tests/run.sh` checks the library using the toolchain selected by
 `ziran pkg path ziran`, including portable `.zib` URL and wire tests. An

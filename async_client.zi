@@ -76,7 +76,7 @@ StartPendingTransfer :: (pending: *PendingRequest, request: HttpRequest,
 SetPendingAddress :: (pending: *PendingRequest, path: string) -> bool {
     server: [512]u8
     if !NormalizeUrl(pending.client.server_url, server[:]) ||
-        !JoinUrl(TextUntilNul(server[:]), path, pending.address[:]) {
+    !JoinUrl(TextUntilNul(server[:]), path, pending.address[:]) {
         FinishRequest(pending, cast(AuthResult)AuthResult.AUTH_INVALID_URL)
         return false
     }
@@ -154,7 +154,7 @@ StartBearer :: (pending: *PendingRequest) {
 InitializeRequest :: (pending: *PendingRequest, client: Client,
     session: *Session, now: s64, transport: AsyncTransport) -> bool {
     if pending == null || session == null || transport.start == null ||
-        transport.poll == null || transport.cancel == null {
+    transport.poll == null || transport.cancel == null {
         return false
     }
     if pending.waiting {
@@ -193,7 +193,7 @@ BeginRequest :: (pending: *PendingRequest, client: Client,
         return false
     }
     if output.count == 0 || !MethodValid(method) || !PathValid(path) ||
-        extra_headers.count > 14 {
+    extra_headers.count > 14 {
         FinishRequest(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
         return true
     }

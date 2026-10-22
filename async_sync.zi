@@ -52,7 +52,7 @@ PrepareNextSync :: (pending: *PendingSync) -> bool {
             SyncFree(cast(*void)pending.page_body)
             pending.page_body = null
         }
-        pending.body = pending.flow.prepare(pending.flow.context)
+        pending.body = pending.flow.prepare(pending.flow.context, pending.record_limit)
         if pending.flow.clock != null {
             pending.now = pending.flow.clock(pending.flow.context)
         }
@@ -100,7 +100,7 @@ BeginSync :: (pending: *PendingSync, client: Client, session: *Session,
     device: Device, now: s64, random_context: *void, random: RandomNonce,
     transport: AsyncTransport, body: string, output: []u8, flow: SyncFlow = .{}) -> bool {
     if pending == null || session == null || pending.request.waiting ||
-        transport.start == null || transport.poll == null || transport.cancel == null {
+    transport.start == null || transport.poll == null || transport.cancel == null {
         return false
     }
     pending.* = PendingSync.{}
@@ -116,7 +116,7 @@ BeginSync :: (pending: *PendingSync, client: Client, session: *Session,
     pending.flow = flow
     pending.record_limit = 64
     if output.count == 0 || (body.count == 0 && flow.prepare == null) ||
-        (flow.prepare != null && (flow.load == null || flow.save == null || flow.accept == null)) {
+    (flow.prepare != null && (flow.load == null || flow.save == null || flow.accept == null)) {
         FinishSync(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
         return true
     }
@@ -148,7 +148,7 @@ PollSync :: (pending: *PendingSync) -> bool {
     }
     if pending.request.result != cast(AuthResult)AuthResult.AUTH_OK {
         if pending.stage == 3 && pending.flow.prepare != null &&
-            pending.request.result == cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED {
+        pending.request.result == cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED {
             if pending.request.failure == TRANSFER_FAILURE_CAPACITY {
                 if !pending.page.enabled {
                     next := pending.page
@@ -201,7 +201,7 @@ PollSync :: (pending: *PendingSync) -> bool {
             {
                 response := TextUntilNul(pending.output)
                 accepted = AcceptSyncResponse(pending.body, response, *pending.page, *next, pending.record_limit) &&
-                    pending.flow.accept(pending.flow.context, response, *next)
+                pending.flow.accept(pending.flow.context, response, *next)
             }
             if !accepted {
                 FinishSync(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
