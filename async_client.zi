@@ -11,12 +11,16 @@ StartTransfer :: #type (context: *void, request: HttpRequest,
     output: []u8) -> bool;
 PollTransfer :: #type (context: *void, status: *s32) -> s32;
 CancelTransfer :: #type (context: *void) -> void;
+TransferFailure :: #type (context: *void) -> s32;
+TRANSFER_FAILURE_TRANSPORT :: 1
+TRANSFER_FAILURE_CAPACITY :: 2
 
 AsyncTransport :: struct {
     context: *void
     start: StartTransfer
     poll: PollTransfer
     cancel: CancelTransfer
+    failure: TransferFailure
 }
 
 PendingRequest :: struct {
@@ -43,6 +47,7 @@ PendingRequest :: struct {
     done: bool
     result: AuthResult
     status: s32
+    failure: s32
 }
 
 FinishRequest :: (pending: *PendingRequest, result: AuthResult) {
@@ -55,6 +60,7 @@ StartPendingTransfer :: (pending: *PendingRequest, request: HttpRequest,
     output: []u8, stage: s32) {
     output[0] = cast(u8)0
     pending.status = 0
+    pending.failure = 0
     pending.stage = stage
     if !pending.transport.start(pending.transport.context, request, output) {
         failure := cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
@@ -224,6 +230,10 @@ PollRequest :: (pending: *PendingRequest) -> bool {
     }
     pending.waiting = false
     if state == 0 {
+        pending.failure = TRANSFER_FAILURE_TRANSPORT
+        if pending.transport.failure != null {
+            pending.failure = pending.transport.failure(pending.transport.context)
+        }
         failure := cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
         if pending.stage == 1 {
             failure = cast(AuthResult)AuthResult.AUTH_CHALLENGE_FAILED

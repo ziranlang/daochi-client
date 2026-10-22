@@ -32,6 +32,8 @@ The protocol modules currently provide:
   native; link libsodium);
 - polled login, bearer requests, and signed sync operations
   (`async_client.zi`, `async_sync.zi`);
+- resumable record pages, bounded transfer recovery and cursor validation
+  (`sync_flow.zi`, used by `async_sync.zi`);
 - alias and friend requests, actions, lists, and stats (`social.zi`);
 - challenge signed account deletion without transmitting a key backup
   (`account.zi`).
@@ -72,6 +74,23 @@ until completion or cancellation. Each pending operation has its own transport
 context. `CancelRequest` and `CancelSync` release an active transfer and finish
 with `AUTH_REQUEST_FAILED`. Both request modes share the same one-login retry
 after a `401`; sync modes share the exact registration and transaction builders.
+
+Pass a `SyncFlow` to `BeginSync` to sync accounts larger than one response
+buffer. Daochi Client switches to the server's encrypted record pages after a
+capacity failure, signs each page request, retries interrupted transfers and
+validates forward cursor progress. It retains a bounded response buffer across
+pages; total account size has no fixed client buffer limit. An optional transport
+`failure` callback reports `TRANSFER_FAILURE_CAPACITY`; other failures retain the
+existing result codes. Smaller record pages are tried if a page itself overflows.
+
+The flow's host callbacks load/save account-and-node-local `SyncPageState`,
+prepare the app's current encrypted records, and accept each response. `accept`
+must atomically merge records and persist the proposed next state, returning
+false without advancing durable progress on failure. Only a terminal page may
+advance the account watermark. On restart the library resumes the saved cursor;
+cancel releases the current transfer and owned request memory. The host's `clock`
+callback refreshes transaction time between pages. These callbacks contain app
+storage policy, not page requests or transport retry decisions.
 
 `sh tests/run.sh` checks the library using the toolchain selected by
 `ziran pkg path ziran`, including portable `.zib` URL and wire tests. An

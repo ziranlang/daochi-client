@@ -1,0 +1,186 @@
+// Resumable encrypted-record downloads. The host persists account/node-local
+// state and atomically merges each accepted page; protocol policy stays here.
+#import "json_scan"
+#import "text_buffer"
+#import "c_string"
+#import "wire"
+
+SyncPageState :: struct {
+    enabled: bool
+    pending: bool
+    cursor: [8192]u8
+}
+
+LoadSyncState :: #type (context: *void, state: *SyncPageState) -> bool;
+PrepareSyncBody :: #type (context: *void) -> string;
+SaveSyncState :: #type (context: *void, state: *SyncPageState) -> bool;
+AcceptSyncPage :: #type (context: *void, response: string, next: *SyncPageState) -> bool;
+SyncClock :: #type (context: *void) -> s64;
+
+SyncFlow :: struct {
+    context: *void
+    load: LoadSyncState
+    prepare: PrepareSyncBody
+    save: SaveSyncState
+    accept: AcceptSyncPage
+    clock: SyncClock
+}
+
+RecordCursor :: struct {
+    version: s64
+    collection: [1024]u8
+    id: [1024]u8
+}
+
+SyncJsonValue :: (text: string, object_at: s32, name: string) -> string {
+    at := FieldAt(text, object_at, name)
+    end := ValueEnd(text, at, 0)
+    if at < 0 || end <= at {
+        return ""
+    }
+    return text[at:end]
+}
+
+SyncVersion :: (text: string, at: s32, value: *s64) -> bool {
+    number := ReadNumber(text, at)
+    if !number.valid || number.value < 0 || number.value > 9007199254740991.0 ||
+        cast(float64)cast(s64)number.value != number.value {
+        return false
+    }
+    value.* = cast(s64)number.value
+    return true
+}
+
+ReadRecordCursor :: (text: string, at: s32, out: *RecordCursor) -> bool {
+    return at >= 0 && at < text.count && text[at] == cast(u8)123 &&
+        SyncVersion(text, FieldAt(text, at, "version"), *out.version) &&
+        ReadStringText(text, FieldAt(text, at, "collection"), out.collection[:]) > 0 &&
+        ReadStringText(text, FieldAt(text, at, "id"), out.id[:]) > 0
+}
+
+CompareSyncText :: (left: string, right: string) -> s32 {
+    index: s64 = 0
+    while index < left.count && index < right.count {
+        if left[index] < right[index] {
+            return -1
+        }
+        if left[index] > right[index] {
+            return 1
+        }
+        index += 1
+    }
+    if left.count == right.count {
+        return 0
+    }
+    return ifx left.count < right.count then -1 else 1
+}
+
+RecordCursorAfter :: (next: *RecordCursor, previous: *RecordCursor) -> bool {
+    if next.version != previous.version {
+        return next.version > previous.version
+    }
+    collection := CompareSyncText(TextUntilNul(next.collection[:]), TextUntilNul(previous.collection[:]))
+    if collection != 0 {
+        return collection > 0
+    }
+    return CompareSyncText(TextUntilNul(next.id[:]), TextUntilNul(previous.id[:])) > 0
+}
+
+// Output borrows the caller's request buffer. Legacy snapshot selectors are
+// deliberately excluded: a page never means replacing an entire local account.
+BuildSyncPageRequest :: (body: string, state: *SyncPageState, limit: s32, output: []u8) -> bool {
+    if Space(body, ValueEnd(body, 0, 0)) != body.count || limit < 1 || limit > 200 {
+        return false
+    }
+    writer := Writer.{.output = output, .valid = true}
+    writer = WriteText(writer, "{\"encrypted_records_only\":true,\"record_limit\":")
+    // Limits are bounded to three decimal digits.
+    if limit >= 100 {
+        writer = WriteByte(writer, cast(u8)(48 + limit / 100))
+    }
+    if limit >= 10 {
+        writer = WriteByte(writer, cast(u8)(48 + (limit / 10) % 10))
+    }
+    writer = WriteByte(writer, cast(u8)(48 + limit % 10))
+    fields: [10]string = .{"protocol_version", "app_id", "user_id_hash", "client_id",
+        "public_key", "since_server_version", "client_clock", "client_capabilities",
+        "encrypted_records", "public_id"}
+    index: s32 = 0
+    while index < fields.count {
+        value := SyncJsonValue(body, 0, fields[index])
+        if value.count > 0 {
+            writer = WriteByte(writer, cast(u8)44)
+            writer = AppendJsonQuoted(writer, fields[index])
+            writer = WriteByte(writer, cast(u8)58)
+            writer = WriteText(writer, value)
+        }
+        index += 1
+    }
+    cursor := TextUntilNul(state.cursor[:])
+    if cursor.count > 0 {
+        parsed: RecordCursor
+        if !ReadRecordCursor(cursor, 0, *parsed) || ValueEnd(cursor, 0, 0) != cursor.count {
+            return false
+        }
+        writer = WriteText(writer, ",\"record_cursor\":")
+        writer = WriteText(writer, cursor)
+    }
+    writer = WriteByte(writer, cast(u8)125)
+    return writer.valid
+}
+
+// No cursor may advance until the host has committed this response. The next
+// state is separate so a rejected or interrupted merge cannot skip records.
+AcceptSyncResponse :: (body: string, response: string, state: *SyncPageState,
+    next: *SyncPageState, limit: s32) -> bool {
+    if response.count == 0 || Space(response, ValueEnd(response, 0, 0)) != response.count {
+        return false
+    }
+    next.* = state.*
+    marker := SyncJsonValue(response, 0, "encrypted_records_only")
+    if !state.enabled {
+        return marker != "true"
+    }
+    if marker != "true" || SyncJsonValue(response, 0, "protocol_version") != "6" {
+        return false
+    }
+    since: s64
+    server: s64
+    if !SyncVersion(body, FieldAt(body, 0, "since_server_version"), *since) ||
+        !SyncVersion(response, FieldAt(response, 0, "server_version"), *server) || server < since {
+        return false
+    }
+    changes := FieldAt(response, 0, "changes")
+    records := FieldAt(response, changes, "encrypted_records")
+    if records < 0 || response[records] != cast(u8)91 || ArrayCount(response, records) > limit {
+        return false
+    }
+    complete := SyncJsonValue(response, 0, "changes_complete")
+    cursor := SyncJsonValue(response, 0, "record_cursor")
+    old: RecordCursor
+    has_previous: bool
+    {
+        previous := TextUntilNul(state.cursor[:])
+        has_previous = previous.count > 0
+        if has_previous && (!ReadRecordCursor(previous, 0, *old) || server < old.version) {
+            return false
+        }
+    }
+    if complete == "true" {
+        if cursor.count > 0 && cursor != "null" {
+            return false
+        }
+        next.pending = false
+        next.cursor[0] = cast(u8)0
+        return true
+    }
+    following: RecordCursor
+    if complete != "false" || ArrayCount(response, records) == 0 ||
+        !ReadRecordCursor(cursor, 0, *following) || following.version < since || following.version > server ||
+        (has_previous && !RecordCursorAfter(*following, *old)) ||
+        !CopyCString(cursor, next.cursor[:]) {
+        return false
+    }
+    next.pending = true
+    return true
+}

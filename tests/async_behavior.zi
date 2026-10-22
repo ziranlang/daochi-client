@@ -7,6 +7,13 @@
 #import "net_http"
 #import "text_buffer"
 #import "c_string"
+#import "sync_flow"
+#import "wire"
+#import "transaction"
+#import "byte_text_linux"
+c :: #system_library "c";
+TestAllocate :: (size: usize) -> *void #foreign c "malloc";
+TestFree :: (pointer: *void) #foreign c "free";
 
 calls: s32;
 challenges: s32;
@@ -25,6 +32,14 @@ reject_syncs: s32;
 bad_request: bool;
 active: bool;
 fail_transport: bool;
+flow_mode: bool;
+flow_failure: s32;
+flow_trial: s32;
+flow_pages: s32;
+flow_applied: s32;
+flow_bytes: s64;
+flow_state: SyncPageState;
+
 
 Contains :: (text: string, part: string) -> bool {
     if part.count > text.count {
@@ -82,7 +97,7 @@ SignDevice :: (context: *void, message: string, output: []u8) -> bool {
 Nonce :: (context: *void, output: []u8) -> bool {
     unused context
     nonces += 1
-    return HexFill(output, 64, cast(u8)(48 + nonces))
+    return HexFill(output, 64, cast(u8)(48 + nonces % 10))
 }
 
 Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
@@ -134,6 +149,41 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
         return CopyCString("{}", output)
     }
     syncs += 1
+    if flow_mode {
+        flow_failure = 0
+        if !Contains(request.body, "\"encrypted_records_only\":true") {
+            flow_failure = TRANSFER_FAILURE_CAPACITY
+            return CopyCString("", output)
+        }
+        if Contains(request.body, "bootstrap") || Contains(request.body, "full_sync_requested") ||
+            Contains(request.body, "last_server_state_hash") || request.headers.count != 3 {
+            bad_request = true
+        }
+        if flow_trial == 1 && flow_applied == 1 && flow_pages < 3 {
+            flow_failure = TRANSFER_FAILURE_TRANSPORT
+        }
+        flow_pages += 1
+        if flow_trial == 4 {
+            return CopyCString("{\"protocol_version\":6,\"encrypted_records_only\":true,\"server_version\":50,\"changes_complete\":false,\"record_cursor\":{\"version\":1,\"collection\":\"notes\",\"id\":\"same\"},\"changes\":{\"encrypted_records\":[{}]}}", output)
+        }
+        writer := Writer.{.output = output, .valid = true}
+        writer = WriteText(writer, "{\"protocol_version\":6,\"encrypted_records_only\":true,\"server_version\":50,\"changes_complete\":")
+        if flow_applied < 19 {
+            writer = WriteText(writer, "false,\"record_cursor\":{\"version\":")
+            writer = WriteDecimal(writer, cast(s64)flow_applied + 1)
+            writer = WriteText(writer, ",\"collection\":\"notes\",\"id\":\"note\"},")
+        } else {
+            writer = WriteText(writer, "true,")
+        }
+        writer = WriteText(writer, "\"changes\":{\"encrypted_records\":[{\"ciphertext\":\"")
+        index: s32 = 0
+        while index < 1048576 {
+            writer = WriteByte(writer, cast(u8)97)
+            index += 1
+        }
+        writer = WriteText(writer, "\"}]}}\n")
+        return writer.valid
+    }
     if request.headers.count != 3 || request.headers[2].name != "X-Daochi-Tx" ||
         !Contains(request.headers[2].value, "\"protocol_version\":6") ||
         !Contains(request.headers[2].value, "\"device_signature\":\"dddd") ||
@@ -160,7 +210,7 @@ Poll :: (context: *void, output_status: *s32) -> s32 {
     }
     active = false
     output_status[0] = status
-    return ifx (fail_transport) then (0) else (1)
+    return ifx (fail_transport || (flow_mode && flow_failure != 0)) then (0) else (1)
 }
 
 Cancel :: (context: *void) {
@@ -190,6 +240,98 @@ Reset :: () {
     bad_request = false
     active = false
     fail_transport = false
+    flow_mode = false
+    flow_failure = 0
+    flow_pages = 0
+    flow_applied = 0
+    flow_bytes = 0
+    flow_state = SyncPageState.{}
+}
+
+FlowFailure :: (context: *void) -> s32 {
+    unused context
+    return flow_failure
+}
+
+FlowLoad :: (context: *void, state: *SyncPageState) -> bool {
+    unused context
+    state.* = flow_state
+    return true
+}
+
+FlowSave :: (context: *void, state: *SyncPageState) -> bool {
+    unused context
+    if flow_trial == 2 { return false }
+    flow_state = state.*
+    return true
+}
+
+FlowPrepare :: (context: *void) -> string {
+    unused context
+    return "{\"protocol_version\":6,\"app_id\":\"inbe\",\"since_server_version\":0,\"encrypted_records\":[],\"bootstrap\":true,\"full_sync_requested\":true,\"last_server_state_hash\":\"hash\"}"
+}
+
+FlowAccept :: (context: *void, response: string, state: *SyncPageState) -> bool {
+    unused context
+    if flow_trial == 3 && flow_applied == 1 { return false }
+    flow_bytes += cast(s64)response.count
+    flow_applied += 1
+    flow_state = state.*
+    return true
+}
+
+CheckFlow :: (client: Client, device: Device, transport: AsyncTransport) -> s32 {
+    memory := TestAllocate(1050000)
+    if memory == null { return 59 }
+    defer { TestFree(memory) }
+    output := BytesFromPointer(cast(*u8)memory, 1050000)
+    trial: s32 = 0
+    while trial < 5 {
+        Reset()
+        flow_trial = trial
+        flow_mode = true
+        host := transport
+        host.failure = FlowFailure
+        flow := SyncFlow.{.load = FlowLoad, .prepare = FlowPrepare, .save = FlowSave, .accept = FlowAccept}
+        session: Session
+        pending: PendingSync
+        if !BeginSync(*pending, client, *session, device, 1000, null,
+            Nonce, host, "", output[:], flow) { return 60 }
+        steps: s32 = 0
+        while !PollSync(*pending) && steps < 250 { steps += 1 }
+        if steps >= 250 || bad_request || active || registrations != 1 { return 61 }
+        if trial < 2 {
+            if pending.result != cast(AuthResult)AuthResult.AUTH_OK || flow_applied != 20 ||
+                flow_bytes < 20000000 || flow_state.pending || flow_state.cursor[0] != cast(u8)0 {
+                return 62 + trial
+            }
+        } else if pending.result != cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED {
+            return 64 + trial
+        }
+        if trial == 2 && (flow_state.enabled || flow_applied != 0) { return 69 }
+        if trial == 3 {
+            // The rejected second page leaves only the first cursor committed.
+            if flow_applied != 1 || !flow_state.pending { return 70 }
+            flow_trial = 0
+            pending = PendingSync.{}
+            unused BeginSync(*pending, client, *session, device, 1000, null,
+                Nonce, host, "", output[:], flow)
+            // Cancel while a page is in flight; durable progress is unchanged.
+            while pending.stage < 3 && !PollSync(*pending) {}
+            CancelSync(*pending)
+            if flow_applied != 1 || !flow_state.pending || active { return 71 }
+            pending = PendingSync.{}
+            unused BeginSync(*pending, client, *session, device, 1000, null,
+                Nonce, host, "", output[:], flow)
+            steps = 0
+            while !PollSync(*pending) && steps < 250 { steps += 1 }
+            if pending.result != cast(AuthResult)AuthResult.AUTH_OK || flow_applied != 20 ||
+                flow_state.pending { return 72 }
+        }
+        if trial == 4 && flow_applied != 1 { return 73 }
+        trial += 1
+    }
+    return 0
 }
 
 #program_export
@@ -321,5 +463,5 @@ main :: () -> s32 {
         }
         trial += 1
     }
-    return 0
+    return CheckFlow(client, device, transport)
 }

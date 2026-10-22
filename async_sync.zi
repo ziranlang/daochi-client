@@ -5,6 +5,12 @@
 #import "sync"
 #import "net_http"
 #import "text_buffer"
+#import "sync_flow"
+#import "byte_text_linux"
+
+c :: #system_library "c";
+SyncAllocate :: (size: usize) -> *void #foreign c "malloc";
+SyncFree :: (pointer: *void) #foreign c "free";
 
 PendingSync :: struct {
     request: PendingRequest
@@ -24,17 +30,75 @@ PendingSync :: struct {
     done: bool
     result: AuthResult
     status: s32
+    flow: SyncFlow
+    page: SyncPageState
+    page_body: *u8
+    record_limit: s32
+    transfer_retries: s32
 }
 
 FinishSync :: (pending: *PendingSync, result: AuthResult) {
+    if pending.page_body != null {
+        SyncFree(cast(*void)pending.page_body)
+        pending.page_body = null
+    }
     pending.result = result
     pending.done = true
+}
+
+PrepareNextSync :: (pending: *PendingSync) -> bool {
+    if pending.flow.prepare != null {
+        if pending.page_body != null {
+            SyncFree(cast(*void)pending.page_body)
+            pending.page_body = null
+        }
+        pending.body = pending.flow.prepare(pending.flow.context)
+        if pending.flow.clock != null {
+            pending.now = pending.flow.clock(pending.flow.context)
+        }
+        if pending.body.count == 0 {
+            return false
+        }
+        if pending.page.enabled {
+            capacity := pending.body.count + 16384
+            pending.page_body = cast(*u8)SyncAllocate(cast(usize)capacity)
+            if pending.page_body == null || !BuildSyncPageRequest(pending.body, *pending.page,
+                pending.record_limit, BytesFromPointer(pending.page_body, cast(u64)capacity)) {
+                return false
+            }
+            pending.body = TextUntilNul(BytesFromPointer(pending.page_body, cast(u64)capacity))
+        }
+    }
+    return pending.body.count > 0
+}
+
+StartSyncTransaction :: (pending: *PendingSync) {
+    if !PrepareNextSync(pending) {
+        FinishSync(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
+        return
+    }
+    prepared := PrepareSyncHeader(pending.client, pending.session,
+        pending.device, pending.now, pending.random_context,
+        pending.random, pending.body, pending.transaction_header[:])
+    if prepared != cast(AuthResult)AuthResult.AUTH_OK {
+        FinishSync(pending, prepared)
+        return
+    }
+    extra: [1]HttpHeader
+    extra[0].name = "X-Daochi-Tx"
+    extra[0].value = TextUntilNul(pending.transaction_header[:])
+    pending.stage = 3
+    if !BeginRequest(*pending.request, pending.client, pending.session,
+        pending.now, pending.transport, "POST", "/api/v1/sync",
+        pending.body, pending.output, extra[:]) {
+        FinishSync(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
+    }
 }
 
 #scope_export
 BeginSync :: (pending: *PendingSync, client: Client, session: *Session,
     device: Device, now: s64, random_context: *void, random: RandomNonce,
-    transport: AsyncTransport, body: string, output: []u8) -> bool {
+    transport: AsyncTransport, body: string, output: []u8, flow: SyncFlow = .{}) -> bool {
     if pending == null || session == null || pending.request.waiting ||
         transport.start == null || transport.poll == null || transport.cancel == null {
         return false
@@ -49,7 +113,14 @@ BeginSync :: (pending: *PendingSync, client: Client, session: *Session,
     pending.transport = transport
     pending.body = body
     pending.output = output
-    if output.count == 0 || body.count == 0 {
+    pending.flow = flow
+    pending.record_limit = 64
+    if output.count == 0 || (body.count == 0 && flow.prepare == null) ||
+        (flow.prepare != null && (flow.load == null || flow.save == null || flow.accept == null)) {
+        FinishSync(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
+        return true
+    }
+    if flow.prepare != null && !flow.load(flow.context, *pending.page) {
         FinishSync(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
         return true
     }
@@ -76,6 +147,32 @@ PollSync :: (pending: *PendingSync) -> bool {
         pending.status = pending.request.status
     }
     if pending.request.result != cast(AuthResult)AuthResult.AUTH_OK {
+        if pending.stage == 3 && pending.flow.prepare != null &&
+            pending.request.result == cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED {
+            if pending.request.failure == TRANSFER_FAILURE_CAPACITY {
+                if !pending.page.enabled {
+                    next := pending.page
+                    next.enabled = true
+                    next.pending = true
+                    if !pending.flow.save(pending.flow.context, *next) {
+                        FinishSync(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
+                        return true
+                    }
+                    pending.page = next
+                    StartSyncTransaction(pending)
+                    return pending.done
+                }
+                if pending.record_limit > 1 {
+                    pending.record_limit = pending.record_limit / 2
+                    StartSyncTransaction(pending)
+                    return pending.done
+                }
+            } else if pending.request.failure == TRANSFER_FAILURE_TRANSPORT && pending.transfer_retries < 2 {
+                pending.transfer_retries += 1
+                StartSyncTransaction(pending)
+                return pending.done
+            }
+        }
         FinishSync(pending, pending.request.result)
         return true
     }
@@ -96,23 +193,27 @@ PollSync :: (pending: *PendingSync) -> bool {
             FinishSync(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
         }
     } else if pending.stage == 2 {
-        prepared := PrepareSyncHeader(pending.client, pending.session,
-            pending.device, pending.now, pending.random_context,
-            pending.random, pending.body, pending.transaction_header[:])
-        if prepared != cast(AuthResult)AuthResult.AUTH_OK {
-            FinishSync(pending, prepared)
-            return true
-        }
-        extra: [1]HttpHeader
-        extra[0].name = "X-Daochi-Tx"
-        extra[0].value = TextUntilNul(pending.transaction_header[:])
-        pending.stage = 3
-        if !BeginRequest(*pending.request, pending.client, pending.session,
-            pending.now, pending.transport, "POST", "/api/v1/sync",
-            pending.body, pending.output, extra[:]) {
-            FinishSync(pending, cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED)
-        }
+        StartSyncTransaction(pending)
     } else {
+        if pending.flow.prepare != null {
+            next: SyncPageState
+            accepted: bool
+            {
+                response := TextUntilNul(pending.output)
+                accepted = AcceptSyncResponse(pending.body, response, *pending.page, *next, pending.record_limit) &&
+                    pending.flow.accept(pending.flow.context, response, *next)
+            }
+            if !accepted {
+                FinishSync(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
+                return true
+            }
+            pending.page = next
+            pending.transfer_retries = 0
+            if next.pending {
+                StartSyncTransaction(pending)
+                return pending.done
+            }
+        }
         FinishSync(pending, pending.request.result)
     }
     return pending.done
