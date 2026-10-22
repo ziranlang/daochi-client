@@ -88,7 +88,8 @@ RecordCursorAfter :: (next: *RecordCursor, previous: *RecordCursor) -> bool {
 
 // Output borrows the caller's request buffer. Legacy snapshot selectors are
 // deliberately excluded: a page never means replacing an entire local account.
-BuildSyncPageRequest :: (body: string, state: *SyncPageState, limit: s32, output: []u8) -> bool {
+BuildSyncPageRequest :: (body: string, state: *SyncPageState, limit: s32, output: []u8,
+    download_only: bool = false) -> bool {
     if Space(body, ValueEnd(body, 0, 0)) != body.count || limit < 1 || limit > 200 {
         return false
     }
@@ -108,6 +109,9 @@ BuildSyncPageRequest :: (body: string, state: *SyncPageState, limit: s32, output
     index: s32 = 0
     while index < fields.count {
         value := SyncJsonValue(body, 0, fields[index])
+        if fields[index] == "encrypted_records" && download_only {
+            value = "[]"
+        }
         if value.count > 0 {
             writer = WriteByte(writer, cast(u8)44)
             writer = AppendJsonQuoted(writer, fields[index])

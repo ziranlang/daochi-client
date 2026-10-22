@@ -39,6 +39,7 @@ flow_pages: s32;
 flow_applied: s32;
 flow_bytes: s64;
 flow_state: SyncPageState;
+flow_download_only: bool;
 
 
 Contains :: (text: string, part: string) -> bool {
@@ -159,6 +160,12 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
         Contains(request.body, "last_server_state_hash") || request.headers.count != 3 {
             bad_request = true
         }
+        if flow_applied < 20 && (!flow_download_only || !Contains(request.body, "\"encrypted_records\":[]")) {
+            bad_request = true
+        }
+        if flow_applied >= 20 && (flow_download_only || !Contains(request.body, "\"encrypted_records\":[{}]")) {
+            bad_request = true
+        }
         if flow_trial == 1 && flow_applied == 1 && flow_pages < 3 {
             flow_failure = TRANSFER_FAILURE_TRANSPORT
         }
@@ -246,6 +253,7 @@ Reset :: () {
     flow_applied = 0
     flow_bytes = 0
     flow_state = SyncPageState.{}
+    flow_download_only = false
 }
 
 FlowFailure :: (context: *void) -> s32 {
@@ -268,8 +276,11 @@ FlowSave :: (context: *void, state: *SyncPageState) -> bool {
 
 FlowPrepare :: (context: *void, maximum_records: s32) -> string {
     unused context
-    if maximum_records < 1 || maximum_records > 200 { bad_request = true }
-    return "{\"protocol_version\":6,\"app_id\":\"inbe\",\"since_server_version\":0,\"encrypted_records\":[],\"bootstrap\":true,\"full_sync_requested\":true,\"last_server_state_hash\":\"hash\"}"
+    if maximum_records < 0 || maximum_records > 200 { bad_request = true }
+    flow_download_only = maximum_records == 0
+    // Even a host that leaves its queued records in the body cannot extend
+    // the restore indefinitely: the library excludes them during downloads.
+    return "{\"protocol_version\":6,\"app_id\":\"inbe\",\"since_server_version\":0,\"encrypted_records\":[{}],\"bootstrap\":true,\"full_sync_requested\":true,\"last_server_state_hash\":\"hash\"}"
 }
 
 FlowAccept :: (context: *void, response: string, state: *SyncPageState) -> bool {
@@ -328,6 +339,15 @@ CheckFlow :: (client: Client, device: Device, transport: AsyncTransport) -> s32 
             while !PollSync(*pending) && steps < 250 { steps += 1 }
             if pending.result != cast(AuthResult)AuthResult.AUTH_OK || flow_applied != 20 ||
             flow_state.pending { return 72 }
+        }
+        if trial == 0 {
+            pending = PendingSync.{}
+            unused BeginSync(*pending, client, *session, device, 1000, null,
+                Nonce, host, "", output[:], flow)
+            steps = 0
+            while !PollSync(*pending) && steps < 30 { steps += 1 }
+            if pending.result != cast(AuthResult)AuthResult.AUTH_OK || flow_download_only ||
+            flow_applied != 21 { return 74 }
         }
         if trial == 4 && flow_applied != 1 { return 73 }
         trial += 1

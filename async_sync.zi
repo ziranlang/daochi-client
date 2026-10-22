@@ -35,6 +35,7 @@ PendingSync :: struct {
     page_body: *u8
     record_limit: s32
     transfer_retries: s32
+    download_only: bool
 }
 
 FinishSync :: (pending: *PendingSync, result: AuthResult) {
@@ -52,7 +53,11 @@ PrepareNextSync :: (pending: *PendingSync) -> bool {
             SyncFree(cast(*void)pending.page_body)
             pending.page_body = null
         }
-        pending.body = pending.flow.prepare(pending.flow.context, pending.record_limit)
+        maximum_records := pending.record_limit
+        if pending.download_only {
+            maximum_records = 0
+        }
+        pending.body = pending.flow.prepare(pending.flow.context, maximum_records)
         if pending.flow.clock != null {
             pending.now = pending.flow.clock(pending.flow.context)
         }
@@ -63,7 +68,7 @@ PrepareNextSync :: (pending: *PendingSync) -> bool {
             capacity := pending.body.count + 16384
             pending.page_body = cast(*u8)SyncAllocate(cast(usize)capacity)
             if pending.page_body == null || !BuildSyncPageRequest(pending.body, *pending.page,
-                pending.record_limit, BytesFromPointer(pending.page_body, cast(u64)capacity)) {
+                pending.record_limit, BytesFromPointer(pending.page_body, cast(u64)capacity), pending.download_only) {
                 return false
             }
             pending.body = TextUntilNul(BytesFromPointer(pending.page_body, cast(u64)capacity))
@@ -124,6 +129,7 @@ BeginSync :: (pending: *PendingSync, client: Client, session: *Session,
         FinishSync(pending, cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED)
         return true
     }
+    pending.download_only = pending.page.enabled && pending.page.pending
     output[0] = cast(u8)0
     pending.stage = 1
     if !BeginSession(*pending.request, client, session, now, transport) {
@@ -159,6 +165,7 @@ PollSync :: (pending: *PendingSync) -> bool {
                         return true
                     }
                     pending.page = next
+                    pending.download_only = true
                     StartSyncTransaction(pending)
                     return pending.done
                 }
@@ -210,6 +217,7 @@ PollSync :: (pending: *PendingSync) -> bool {
             pending.page = next
             pending.transfer_retries = 0
             if next.pending {
+                pending.download_only = true
                 StartSyncTransaction(pending)
                 return pending.done
             }

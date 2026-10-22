@@ -94,6 +94,10 @@ storage policy, not page requests or transport retry decisions.
 `prepare` receives the maximum encrypted record count for the next upload,
 including any reduction after an oversized page. Retain its returned body until
 the next `prepare` call or completion.
+Zero means download only: after overflow recovery or while resuming a partial
+download, the library omits uploads until the terminal page. Otherwise repeated
+uploads could keep moving the same account's download cursor. A later sync can
+upload the retained local queue.
 
 `sh tests/run.sh` checks the library using the toolchain selected by
 `ziran pkg path ziran`, including portable `.zib` URL and wire tests. An
