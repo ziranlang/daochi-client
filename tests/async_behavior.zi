@@ -166,6 +166,9 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
         if flow_applied >= 20 && (flow_download_only || !Contains(request.body, "\"encrypted_records\":[{}]")) {
             bad_request = true
         }
+        if flow_applied >= 20 {
+            return CopyCString("{\"protocol_version\":6,\"encrypted_records_only\":true,\"server_version\":50,\"changes_complete\":true,\"changes\":{\"habits\":[],\"habit_days\":[],\"sessions\":[],\"meditation_logs\":[],\"social_cache\":[]}}", output)
+        }
         if flow_trial == 1 && flow_applied == 1 && flow_pages < 3 {
             flow_failure = TRANSFER_FAILURE_TRANSPORT
         }
@@ -355,8 +358,38 @@ CheckFlow :: (client: Client, device: Device, transport: AsyncTransport) -> s32 
     return 0
 }
 
+CheckEmptyRecordPages :: () -> bool {
+    state := SyncPageState.{.enabled = true}
+    next: SyncPageState
+    body := "{\"since_server_version\":50}"
+    // Daochi omits encrypted_records when no records changed (omitempty).
+    prefix := "{\"protocol_version\":6,\"encrypted_records_only\":true,\"server_version\":50,\"changes_complete\":true,\"changes\":"
+    response: [512]u8
+    writer := Writer.{.output = response[:], .valid = true}
+    writer = WriteText(writer, prefix)
+    writer = WriteText(writer, "{\"habits\":[],\"habit_days\":[],\"sessions\":[],\"meditation_logs\":[],\"social_cache\":[]}}")
+    if !writer.valid || !AcceptSyncResponse(body, TextUntilNul(response[:]), *state, *next, 64) || next.pending {
+        return false
+    }
+    invalid: [3]string = .["{\"encrypted_records\":null}}", "{\"encrypted_records\":{}}}", "null}"]
+    for suffix: invalid {
+        writer = Writer.{.output = response[:], .valid = true}
+        writer = WriteText(writer, prefix)
+        writer = WriteText(writer, suffix)
+        if !writer.valid || AcceptSyncResponse(body, TextUntilNul(response[:]), *state, *next, 64) {
+            return false
+        }
+    }
+    return !AcceptSyncResponse(body,
+        "{\"protocol_version\":6,\"encrypted_records_only\":true,\"server_version\":50,\"changes_complete\":false,\"record_cursor\":{\"version\":50,\"collection\":\"notes\",\"id\":\"note\"},\"changes\":{}}",
+        *state, *next, 64)
+}
+
 #program_export
 main :: () -> s32 {
+    if !CheckEmptyRecordPages() {
+        return 75
+    }
     account: [65]u8
     device_key: [65]u8
     unused HexFill(account[:], 64, cast(u8)97)

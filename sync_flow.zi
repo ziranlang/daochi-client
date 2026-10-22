@@ -155,8 +155,20 @@ AcceptSyncResponse :: (body: string, response: string, state: *SyncPageState,
         return false
     }
     changes := FieldAt(response, 0, "changes")
+    if changes < 0 || response[changes] != cast(u8)123 {
+        return false
+    }
     records := FieldAt(response, changes, "encrypted_records")
-    if records < 0 || response[records] != cast(u8)91 || ArrayCount(response, records) > limit {
+    // Daochi's released response omits an empty encrypted-record array.
+    // An absent array is empty; a present value must still be an array.
+    record_count: s32 = 0
+    if records >= 0 {
+        if response[records] != cast(u8)91 {
+            return false
+        }
+        record_count = ArrayCount(response, records)
+    }
+    if record_count > limit {
         return false
     }
     complete := SyncJsonValue(response, 0, "changes_complete")
@@ -179,7 +191,7 @@ AcceptSyncResponse :: (body: string, response: string, state: *SyncPageState,
         return true
     }
     following: RecordCursor
-    if complete != "false" || ArrayCount(response, records) == 0 ||
+    if complete != "false" || record_count == 0 ||
     !ReadRecordCursor(cursor, 0, *following) || following.version < since || following.version > server ||
     (has_previous && !RecordCursorAfter(*following, *old)) ||
     !CopyCString(cursor, next.cursor[:]) {
