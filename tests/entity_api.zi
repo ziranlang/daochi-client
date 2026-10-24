@@ -12,11 +12,23 @@ EntityTestBlobKey :: (private_key: []u8, kind: string, hash: string, output: []u
 }
 
 #program_export
-EntityTestSeal :: (private_key: []u8, kind: string, plain: []u8, hash: []u8, output: []u8) -> s64 {
-    return SealEntityBlob(private_key, kind, plain, hash, output)
+EntityTestChunkKey :: (private_key: []u8, kind: string, hash: string, index: s64, output: []u8) -> bool {
+    return EntityChunkKey(private_key, kind, hash, index, output)
 }
 
 #program_export
-EntityTestOpen :: (private_key: []u8, kind: string, hash: string, sealed: []u8, output: []u8) -> s64 {
-    return OpenEntityBlob(private_key, kind, hash, sealed, output)
+EntityTestSeal :: (private_key: []u8, kind: string, hash: string, index: s64, plain: []u8, output: []u8) -> s64 {
+    return SealEntityChunk(private_key, kind, hash, index, plain, output)
+}
+
+#program_export
+EntityTestOpen :: (private_key: []u8, kind: string, hash: string, index: s64, sealed: []u8, output: []u8) -> s64 {
+    return OpenEntityChunk(private_key, kind, hash, index, sealed, output)
+}
+
+#import "crypto"
+
+#program_export
+EntityTestSha256Hex :: (data: []u8, output: []u8) {
+    if data.count > 0 && output.count >= 65 { Sha256Hex(*data[0], data.count, *output[0]) }
 }

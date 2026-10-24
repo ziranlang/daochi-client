@@ -8,6 +8,10 @@ ENTITY_KEY_BYTES :: 32
 ENTITY_RECORD_KEY_ID :: "entity-v1"
 ENTITY_KIND_MAX :: 48
 ENTITY_HASH_HEX_BYTES :: 64
+// Content is sealed in chunks of at most 8 MiB, below the node's 16 MiB
+// blob limit; a record lists their addresses in order.
+ENTITY_CHUNK_BYTES :: 8388608
+ENTITY_CHUNK_MAX :: 1000000
 
 #scope_file
 ENTITY_CONTEXT_MAX :: 96
@@ -39,6 +43,44 @@ Context :: (prefix: string, kind: string, output: []u8) -> s64 {
         length += 1
     }
     for byte: kind {
+        output[length] = byte
+        length += 1
+    }
+    return length
+}
+
+// index in decimal, written into output.
+Decimal :: (index: s64, output: []u8) -> string {
+    length: s64 = 0
+    value := index
+    while true {
+        output[length] = cast(u8)(48 + value % 10)
+        length += 1
+        value /= 10
+        if value == 0 { break }
+    }
+    left: s64 = 0
+    right := length - 1
+    while left < right {
+        swap := output[left]
+        output[left] = output[right]
+        output[right] = swap
+        left += 1
+        right -= 1
+    }
+    return TextView(output[0:length])
+}
+
+// "daochi-entity-v1/blob/" + kind + "/" + index.
+ChunkAAD :: (kind: string, index: s64, output: []u8) -> s64 {
+    if index < 0 || index >= ENTITY_CHUNK_MAX { return -1 }
+    length := Context("daochi-entity-v1/blob/", kind, output)
+    digits: [8]u8
+    number := Decimal(index, digits[:])
+    if length < 0 || length + 1 + number.count > output.count { return -1 }
+    output[length] = 47
+    length += 1
+    for byte: number {
         output[length] = byte
         length += 1
     }
@@ -78,19 +120,33 @@ EntityBlobKey :: (private_key: []u8, kind: string, hash: string, output: []u8) -
     return HmacSha256Text(*base[0], ENTITY_KEY_BYTES, hash, *output[0]) == 1
 }
 
-// Seal plain bytes as an entity blob of kind into output, which needs
-// plain.count + 16 bytes. hash receives the plain SHA-256 hex (65 bytes with
-// its NUL) that names the record. The node stores the sealed bytes at their
-// own SHA-256. Returns the sealed length, or -1 with output cleared.
-SealEntityBlob :: (private_key: []u8, kind: string, plain: []u8, hash: []u8, output: []u8) -> s64 {
-    if hash.count < ENTITY_HASH_HEX_BYTES + 1 || output.count < plain.count + 16 || plain.count < 1 { return -1 }
-    Sha256Hex(*plain[0], plain.count, *hash[0])
+// The key of chunk index of the content named hash:
+// HMAC-SHA256(EntityBlobKey(private_key, kind, hash), "chunk/" + index).
+EntityChunkKey :: (private_key: []u8, kind: string, hash: string, index: s64, output: []u8) -> bool {
+    if index < 0 || index >= ENTITY_CHUNK_MAX || output.count < ENTITY_KEY_BYTES { return false }
+    base: [ENTITY_KEY_BYTES]u8
+    defer { Wipe(base[:]) }
+    if !EntityBlobKey(private_key, kind, hash, base[:]) { return false }
+    digits: [8]u8
+    label: [24]u8
+    length := Context("chunk/", Decimal(index, digits[:]), label[:])
+    return length > 0 && HmacSha256(*base[0], ENTITY_KEY_BYTES, *label[0], length, *output[0]) == 1
+}
+
+// Seal chunk index (at most ENTITY_CHUNK_BYTES plain bytes) of the content
+// named hash, the lowercase SHA-256 hex of the whole plain content, into
+// output, which needs plain.count + 16 bytes. The node stores the sealed
+// bytes at their own SHA-256. Returns the sealed length, or -1 with output
+// cleared.
+SealEntityChunk :: (private_key: []u8, kind: string, hash: string, index: s64, plain: []u8,
+    output: []u8) -> s64 {
+    if plain.count < 1 || plain.count > ENTITY_CHUNK_BYTES || output.count < plain.count + 16 { return -1 }
     aad: [ENTITY_CONTEXT_MAX]u8
-    aad_length := Context("daochi-entity-v1/blob/", kind, aad[:])
+    aad_length := ChunkAAD(kind, index, aad[:])
     key: [ENTITY_KEY_BYTES]u8
     defer { Wipe(key[:]) }
     nonce: [12]u8
-    if aad_length < 0 || !EntityBlobKey(private_key, kind, TextView(hash[0:ENTITY_HASH_HEX_BYTES]), key[:]) ||
+    if aad_length < 0 || !EntityChunkKey(private_key, kind, hash, index, key[:]) ||
         ChaCha20Poly1305Seal(*key[0], *nonce[0], *plain[0], plain.count, *aad[0], aad_length,
             *output[0], output.count) != 1 {
         Wipe(output)
@@ -99,28 +155,22 @@ SealEntityBlob :: (private_key: []u8, kind: string, plain: []u8, hash: []u8, out
     return plain.count + 16
 }
 
-// Open a sealed entity blob of kind whose plain bytes hash to hash. Returns
-// the plain length, or -1 with output cleared when it does not authenticate
-// or its content is not that hash.
-OpenEntityBlob :: (private_key: []u8, kind: string, hash: string, sealed: []u8, output: []u8) -> s64 {
-    if sealed.count <= 16 || output.count < sealed.count - 16 { return -1 }
+// Open chunk index of the content named hash. Returns the plain length, or
+// -1 with output cleared when it does not authenticate. The reader checks
+// the SHA-256 of all chunks together against hash.
+OpenEntityChunk :: (private_key: []u8, kind: string, hash: string, index: s64, sealed: []u8,
+    output: []u8) -> s64 {
+    if sealed.count <= 16 || sealed.count > ENTITY_CHUNK_BYTES + 16 || output.count < sealed.count - 16 { return -1 }
     aad: [ENTITY_CONTEXT_MAX]u8
-    aad_length := Context("daochi-entity-v1/blob/", kind, aad[:])
+    aad_length := ChunkAAD(kind, index, aad[:])
     key: [ENTITY_KEY_BYTES]u8
     defer { Wipe(key[:]) }
     nonce: [12]u8
-    if aad_length < 0 || !EntityBlobKey(private_key, kind, hash, key[:]) ||
+    if aad_length < 0 || !EntityChunkKey(private_key, kind, hash, index, key[:]) ||
         ChaCha20Poly1305Open(*key[0], *nonce[0], *sealed[0], sealed.count, *aad[0], aad_length,
             *output[0], output.count) != 1 {
         Wipe(output)
         return -1
     }
-    length := sealed.count - 16
-    actual: [ENTITY_HASH_HEX_BYTES + 1]u8
-    Sha256Hex(*output[0], length, *actual[0])
-    if TextView(actual[0:ENTITY_HASH_HEX_BYTES]) != hash {
-        Wipe(output)
-        return -1
-    }
-    return length
+    return sealed.count - 16
 }

@@ -30,9 +30,9 @@ The protocol modules currently provide:
 - encrypted record profile v1 (`daochi-record-v1`) envelopes with canonical
   authenticated metadata and fresh XChaCha20-Poly1305 nonces (`record.zi`,
   native; link libsodium);
-- entity data keys and shared blobs (`entity.zi`): the record key of each kind
-  of account data and convergent blob sealing, so every app of the account
-  stores one copy of each photo or level (Daochi `docs/entity-data.md`);
+- entity data keys and shared chunks (`entity.zi`): the record key of each kind
+  of account data and convergent 8 MiB chunk sealing, so every app of the
+  account stores one copy of each photo or level (Daochi `docs/entity-data.md`);
 - polled login, bearer requests, and signed sync operations
   (`async_client.zi`, `async_sync.zi`);
 - resumable record pages, bounded transfer recovery and cursor validation
