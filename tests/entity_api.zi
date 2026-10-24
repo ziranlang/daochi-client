@@ -1,0 +1,22 @@
+// C test exports only; apps import entity directly.
+#import "entity"
+
+#program_export
+EntityTestRecordKey :: (private_key: []u8, kind: string, output: []u8) -> bool {
+    return EntityRecordKey(private_key, kind, output)
+}
+
+#program_export
+EntityTestBlobKey :: (private_key: []u8, kind: string, hash: string, output: []u8) -> bool {
+    return EntityBlobKey(private_key, kind, hash, output)
+}
+
+#program_export
+EntityTestSeal :: (private_key: []u8, kind: string, plain: []u8, hash: []u8, output: []u8) -> s64 {
+    return SealEntityBlob(private_key, kind, plain, hash, output)
+}
+
+#program_export
+EntityTestOpen :: (private_key: []u8, kind: string, hash: string, sealed: []u8, output: []u8) -> s64 {
+    return OpenEntityBlob(private_key, kind, hash, sealed, output)
+}

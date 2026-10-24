@@ -24,7 +24,7 @@
     "name": "DaochiClient"
   },
   "toolchain": {
-    "commit": "ebb50d28ba83d669b6bae39e40653527ac905d69",
+    "commit": "620c4077a801d63984fa4bc6893e857659a5e7e9",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }

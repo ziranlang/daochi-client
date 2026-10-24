@@ -72,6 +72,14 @@ echo 'Daochi signed release parsing passed'
     ${SODIUM_LIBS:--l:libsodium.so.23} -o "$work/record-test"
 "$work/record-test"
 
+"$compiler" --no-main --root "$root/tests" --module-path "$root" --module-path "$ziran/std" \
+    -o "$work/entity" "$root/tests/entity_api.zi"
+"${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror \
+    -Wno-unused-function -Wno-unused-variable \
+    -I"$ziran/include" -I"$work/entity" \
+    "$root/tests/entity_test.c" "$work/entity"/*.c -o "$work/entity-test"
+"$work/entity-test"
+
 "$compiler" --no-main --root "$root/tests" \
     --module-path "$root" --module-path "$ziran/std" \
     -o "$work/async" "$root/tests/async_behavior.zi"
@@ -148,22 +156,22 @@ env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS \
 
 "$ziran_bin" bundle --root "$root/tests" \
     --module-path "$root" --module-path "$ziran/std" \
-    --entry url_portable:Check -o "$work/url.zib" \
+    --entry url_portable:Check -o "$work/url.zx" \
     "$root/tests/url_portable.zi"
-test "$("$ziran_bin" run "$work/url.zib")" = 0
+test "$("$ziran_bin" run "$work/url.zx")" = 0
 echo 'Daochi Ziran URL portable bundle passed'
 
 "$ziran_bin" bundle --root "$root/tests" \
     --module-path "$root" --module-path "$ziran/std" \
-    --entry wire_portable:Check -o "$work/wire.zib" \
+    --entry wire_portable:Check -o "$work/wire.zx" \
     "$root/tests/wire_portable.zi"
-test "$("$ziran_bin" run "$work/wire.zib")" = 0
+test "$("$ziran_bin" run "$work/wire.zx")" = 0
 "$ziran_bin" ir --root "$root/tests" \
     --module-path "$root" --module-path "$ziran/std" \
     -o "$work/wire-ir" "$root/tests/wire_portable.zi"
 "$ziran_bin" bundle --root "$work/wire-ir" \
     --module-path "$root" --module-path "$ziran/std" \
-    --entry wire_portable:Check -o "$work/wire-saved.zib" \
+    --entry wire_portable:Check -o "$work/wire-saved.zx" \
     "$work/wire-ir/wire_portable.zir"
-test "$("$ziran_bin" run "$work/wire-saved.zib")" = 0
+test "$("$ziran_bin" run "$work/wire-saved.zx")" = 0
 echo 'Daochi Ziran wire portable bundle passed'

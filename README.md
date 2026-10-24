@@ -30,6 +30,9 @@ The protocol modules currently provide:
 - encrypted record profile v1 (`daochi-record-v1`) envelopes with canonical
   authenticated metadata and fresh XChaCha20-Poly1305 nonces (`record.zi`,
   native; link libsodium);
+- entity data keys and shared blobs (`entity.zi`): the record key of each kind
+  of account data and convergent blob sealing, so every app of the account
+  stores one copy of each photo or level (Daochi `docs/entity-data.md`);
 - polled login, bearer requests, and signed sync operations
   (`async_client.zi`, `async_sync.zi`);
 - resumable record pages, bounded transfer recovery and cursor validation
@@ -100,10 +103,10 @@ uploads could keep moving the same account's download cursor. A later sync can
 upload the retained local queue.
 
 `sh tests/run.sh` checks the library using the toolchain selected by
-`ziran pkg path ziran`, including portable `.zib` URL and wire tests. An
+`ziran pkg path ziran`, including portable `.zx` URL and wire tests. An
 ignored `ziran.local.toml` can select the local compiler at
 `../../ziran`; otherwise the test uses `ziran.lock`. The wire
-test also checks a saved `.zir` to `.zib` round trip. Set `ZIRAN_BIN` to use
+test also checks a saved `.zir` to `.zx` round trip. Set `ZIRAN_BIN` to use
 a different launcher, or `ZIRAN_DIR` and `ZI2C_BIN` for explicit compiler
 overrides.
 
@@ -113,8 +116,8 @@ payload builder, response merge, key store, and platform transport.
 
 The protocol uses Ziran's `TextView` and bounded `TextUntilNul` instead of
 a native string-layout adapter. URL policy, wire builders, and signed device
-registration message construction compile and run as portable `.zib`. The
-full HTTP client is **not yet a `.zib` bundle**: host transport, digest, and
+registration message construction compile and run as portable `.zx`. The
+full HTTP client is **not yet a `.zx` bundle**: host transport, digest, and
 signer callbacks need bundle capabilities. Native Linux integration is tested;
 browser and Android transports remain application host work.
 
