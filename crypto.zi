@@ -1,5 +1,6 @@
 // Account and record cryptography for Daochi apps: SHA-256, HMAC-SHA-256,
-// PBKDF2-HMAC-SHA-256, and RFC 8439 ChaCha20-Poly1305, with hex encoding.
+// PBKDF2-HMAC-SHA-256, RFC 8439 ChaCha20-Poly1305 and its 24-byte nonce
+// form XChaCha20-Poly1305, with hex encoding.
 // All of it is plain Ziran; the signatures themselves come from the Oqs
 // package. The functions take byte pointers and lengths and return 1 on
 // success, 0 on invalid input.
@@ -805,4 +806,97 @@ ChaCha20Poly1305Open :: (key: *u8, nonce: *u8,
         ChaChaXor(key, nonce, sealed, plain_length, plain)
     }
     return 1
+}
+
+// HChaCha20 (draft-irtf-cfrg-xchacha): the ChaCha20 rounds over the key and
+// a 16-byte nonce, without the final addition; words 0-3 and 12-15 are the
+// 32-byte subkey.
+HChaCha20 :: (key: *u8, nonce: *u8, output: *u8) {
+    working: [16]u32
+    working[0] = 0x61707865
+    working[1] = 0x3320646e
+    working[2] = 0x79622d32
+    working[3] = 0x6b206574
+    index: s32 = 0
+    while index < 8 {
+        working[4 + index] = Poly1305Load32(*key[index * 4])
+        index += 1
+    }
+    index = 0
+    while index < 4 {
+        working[12 + index] = Poly1305Load32(*nonce[index * 4])
+        index += 1
+    }
+    round: s32 = 0
+    while round < 10 {
+        ChaChaQuarterRound(*working[0], 0, 4, 8, 12)
+        ChaChaQuarterRound(*working[0], 1, 5, 9, 13)
+        ChaChaQuarterRound(*working[0], 2, 6, 10, 14)
+        ChaChaQuarterRound(*working[0], 3, 7, 11, 15)
+        ChaChaQuarterRound(*working[0], 0, 5, 10, 15)
+        ChaChaQuarterRound(*working[0], 1, 6, 11, 12)
+        ChaChaQuarterRound(*working[0], 2, 7, 8, 13)
+        ChaChaQuarterRound(*working[0], 3, 4, 9, 14)
+        round += 1
+    }
+    index = 0
+    while index < 4 {
+        Poly1305Store32(*output[index * 4], working[index])
+        Poly1305Store32(*output[16 + index * 4], working[12 + index])
+        index += 1
+    }
+}
+
+// The subkey and 12-byte nonce that XChaCha20-Poly1305 hands to
+// ChaCha20-Poly1305: four zero bytes, then the last 8 nonce bytes.
+XChaChaSubkey :: (key: *u8, nonce: *u8, subkey: *u8, short_nonce: *u8) {
+    HChaCha20(key, nonce, subkey)
+    index: s32 = 0
+    while index < 12 {
+        short_nonce[index] = ifx index < 4 then cast(u8)0 else nonce[12 + index]
+        index += 1
+    }
+}
+
+XChaChaWipe :: (bytes: *u8, length: s32) {
+    index: s32 = 0
+    while index < length {
+        bytes[index] = 0
+        index += 1
+    }
+}
+
+// XChaCha20-Poly1305 with a 24-byte nonce, the same construction as
+// libsodium's crypto_aead_xchacha20poly1305_ietf and Monocypher's AEAD:
+// output receives the ciphertext and its 16-byte tag.
+#program_export
+XChaCha20Poly1305Seal :: (key: *u8, nonce: *u8,
+    plain: *u8, plain_length: s64, aad: *u8, aad_length: s64,
+    output: *u8, output_capacity: s64) -> s32 {
+    if key == null || nonce == null {
+        return 0
+    }
+    subkey: [32]u8
+    short_nonce: [12]u8
+    XChaChaSubkey(key, nonce, *subkey[0], *short_nonce[0])
+    sealed := ChaCha20Poly1305Seal(*subkey[0], *short_nonce[0], plain, plain_length,
+        aad, aad_length, output, output_capacity)
+    XChaChaWipe(*subkey[0], 32)
+    return sealed
+}
+
+#program_export
+XChaCha20Poly1305Open :: (key: *u8, nonce: *u8,
+    sealed: *u8, sealed_length: s64, aad: *u8, aad_length: s64,
+    plain: *u8, plain_capacity: s64) -> s32 {
+    if key == null || nonce == null {
+        return 0
+    }
+    subkey: [32]u8
+    short_nonce: [12]u8
+    XChaChaSubkey(key, nonce, *subkey[0], *short_nonce[0])
+    opened := ChaCha20Poly1305Open(*subkey[0], *short_nonce[0], sealed, sealed_length,
+        aad, aad_length, plain, plain_capacity)
+    XChaChaWipe(*subkey[0], 32)
+    return opened
 }

@@ -3,6 +3,7 @@
 // keys come from the account private key bytes, so every app derives the
 // same ones. Keys and plaintext never leave the caller's buffers.
 #import "crypto"
+#import "json_scan"
 
 ENTITY_KEY_BYTES :: 32
 ENTITY_RECORD_KEY_ID :: "entity-v1"
@@ -173,4 +174,309 @@ OpenEntityChunk :: (private_key: []u8, kind: string, hash: string, index: s64, s
         return -1
     }
     return sealed.count - 16
+}
+
+// ---------------------------------------------------------------------------
+// Entity records: the daochi-record-v1 envelope (Daochi
+// docs/encrypted-record-profile-v1.md) sealed with the record key of their
+// kind. A sync request carries the envelope JSON as base64url "ciphertext"
+// beside the base64url "nonce", with key_id entity-v1.
+
+ENTITY_RECORD_APP :: "entity"
+ENTITY_RECORD_SCHEMA_MAX :: 128
+ENTITY_RECORD_ID_MAX :: 128
+ENTITY_RECORD_NONCE_BYTES :: 24
+// The node keeps at most 256 KiB of ciphertext text per record.
+ENTITY_RECORD_TEXT_MAX :: 262144
+// The largest plain text whose sync text stays within that: the envelope's
+// own fields take at most 760 bytes.
+ENTITY_RECORD_PLAIN_MAX :: 146432
+
+// What a record's associated data names; the collection is
+// private.entity.v1.<kind>.
+EntityRecordMetadata :: struct {
+    account_id: string
+    kind: string
+    id: string
+    schema: string
+}
+
+#scope_file
+BASE64_URL :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+// Letters, digits and - . : _ only, so the associated data is the same JSON
+// in every implementation without escaping.
+PlainText :: (value: string, maximum: s64) -> bool {
+    if value.count < 1 || value.count > maximum { return false }
+    for byte: value {
+        if !((byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) ||
+            byte == 45 || byte == 46 || byte == 58 || byte == 95) { return false }
+    }
+    return true
+}
+
+MetadataValid :: (metadata: EntityRecordMetadata) -> bool {
+    return HashValid(metadata.account_id) && KindValid(metadata.kind) &&
+        PlainText(metadata.id, ENTITY_RECORD_ID_MAX) && PlainText(metadata.schema, ENTITY_RECORD_SCHEMA_MAX)
+}
+
+// Text appended to a bounded buffer; length is -1 once anything did not fit.
+Out :: struct {
+    bytes: []u8
+    length: s64
+}
+
+Put :: (out: *Out, text: string) {
+    if out.length < 0 { return }
+    if out.length + text.count > out.bytes.count { out.length = -1; return }
+    for byte: text {
+        out.bytes[out.length] = byte
+        out.length += 1
+    }
+}
+
+// Base64url without padding, written into out as it arrives; Flush ends it.
+Base64 :: struct {
+    out: *Out
+    carry: u32
+    held: s32
+}
+
+Base64Byte :: (encoder: *Base64, byte: u8) {
+    encoder.carry = (encoder.carry << 8) | cast(u32)byte
+    encoder.held += 1
+    if encoder.held < 3 { return }
+    alphabet := BASE64_URL
+    digits: [4]u8
+    digits[0] = alphabet[cast(s64)((encoder.carry >> 18) & 63)]
+    digits[1] = alphabet[cast(s64)((encoder.carry >> 12) & 63)]
+    digits[2] = alphabet[cast(s64)((encoder.carry >> 6) & 63)]
+    digits[3] = alphabet[cast(s64)(encoder.carry & 63)]
+    Put(encoder.out, TextView(digits[:]))
+    encoder.carry = 0
+    encoder.held = 0
+}
+
+Base64Text :: (encoder: *Base64, text: string) {
+    for byte: text { Base64Byte(encoder, byte) }
+}
+
+Base64Flush :: (encoder: *Base64) {
+    if encoder.held == 0 { return }
+    alphabet := BASE64_URL
+    value := encoder.carry << cast(u32)(8 * (3 - encoder.held))
+    digits: [3]u8
+    digits[0] = alphabet[cast(s64)((value >> 18) & 63)]
+    digits[1] = alphabet[cast(s64)((value >> 12) & 63)]
+    digits[2] = alphabet[cast(s64)((value >> 6) & 63)]
+    Put(encoder.out, TextView(digits[0:encoder.held + 1]))
+    encoder.carry = 0
+    encoder.held = 0
+}
+
+// The base64url digits of bytes, fed to encoder: the envelope carries its
+// ciphertext and nonce this way, inside the base64url sync text.
+Base64Nested :: (encoder: *Base64, bytes: []u8) {
+    inner_out: Out
+    digits: [4]u8
+    inner_out.bytes = digits[:]
+    inner := Base64.{.out = *inner_out}
+    for byte: bytes {
+        inner_out.length = 0
+        Base64Byte(*inner, byte)
+        if inner_out.length > 0 { Base64Text(encoder, TextView(digits[0:inner_out.length])) }
+    }
+    inner_out.length = 0
+    Base64Flush(*inner)
+    if inner_out.length > 0 { Base64Text(encoder, TextView(digits[0:inner_out.length])) }
+}
+
+Base64Digit :: (byte: u8) -> s32 {
+    if byte >= 65 && byte <= 90 { return cast(s32)(byte - 65) }
+    if byte >= 97 && byte <= 122 { return cast(s32)(byte - 97) + 26 }
+    if byte >= 48 && byte <= 57 { return cast(s32)(byte - 48) + 52 }
+    if byte == 45 { return 62 }
+    if byte == 95 { return 63 }
+    return -1
+}
+
+// Decodes canonical base64url without padding into output, which may start
+// at the same byte as text: each byte is written after the digits it comes
+// from were read. The length, or -1.
+Base64Decode :: (text: string, output: []u8) -> s64 {
+    if text.count % 4 == 1 { return -1 }
+    size := text.count / 4 * 3 + ifx text.count % 4 == 0 then cast(s64)0 else text.count % 4 - 1
+    if size > output.count { return -1 }
+    value: u32 = 0
+    bits: s32 = 0
+    length: s64 = 0
+    for byte: text {
+        digit := Base64Digit(byte)
+        if digit < 0 { return -1 }
+        value = (value << 6) | cast(u32)digit
+        bits += 6
+        if bits >= 8 {
+            bits -= 8
+            output[length] = cast(u8)((value >> cast(u32)bits) & 255)
+            length += 1
+        }
+    }
+    if bits > 0 && (value & ((cast(u32)1 << cast(u32)bits) - 1)) != 0 { return -1 }
+    return length
+}
+
+// {"account_id":…,"app_id":"entity","collection":"private.entity.v1.<kind>",
+// "id":…,"schema":…}, the associated data, into out.
+PutAAD :: (out: *Out, metadata: EntityRecordMetadata) {
+    Put(out, "{\"account_id\":\"")
+    Put(out, metadata.account_id)
+    Put(out, "\",\"app_id\":\"entity\",\"collection\":\"private.entity.v1.")
+    Put(out, metadata.kind)
+    Put(out, "\",\"id\":\"")
+    Put(out, metadata.id)
+    Put(out, "\",\"schema\":\"")
+    Put(out, metadata.schema)
+    Put(out, "\"}")
+}
+
+// The string field name of the object at at, unescaped into output; "" when
+// it is missing or does not fit.
+StringField :: (text: string, at: s32, name: string, output: []u8) -> string {
+    field := FieldAt(text, at, name)
+    if field < 0 { return "" }
+    length := ReadStringText(text, field, output)
+    if length < 0 { return "" }
+    return TextView(output[0:length])
+}
+
+#scope_export
+EntityRecordMetadataValid :: (metadata: EntityRecordMetadata) -> bool { return MetadataValid(metadata) }
+
+// private.entity.v1.<kind> into output; "" for an invalid kind.
+EntityRecordCollection :: (kind: string, output: []u8) -> string {
+    out := Out.{.bytes = output}
+    if !KindValid(kind) { return "" }
+    Put(*out, "private.entity.v1.")
+    Put(*out, kind)
+    if out.length < 0 { return "" }
+    return TextView(output[0:out.length])
+}
+
+// The kind of an entity collection, private.entity.v1.<kind>; "" otherwise.
+EntityRecordKind :: (collection: string) -> string {
+    prefix := "private.entity.v1."
+    if collection.count <= prefix.count || collection[0:prefix.count] != prefix { return "" }
+    kind := collection[prefix.count:]
+    return ifx KindValid(kind) then kind else ""
+}
+
+// The nonce as the sync request carries it, base64url (32 digits).
+EntityRecordNonceText :: (nonce: []u8, output: []u8) -> string {
+    out := Out.{.bytes = output}
+    if nonce.count != ENTITY_RECORD_NONCE_BYTES { return "" }
+    encoder := Base64.{.out = *out}
+    for byte: nonce { Base64Byte(*encoder, byte) }
+    Base64Flush(*encoder)
+    if out.length < 0 { return "" }
+    return TextView(output[0:out.length])
+}
+
+// Seals plain (at most ENTITY_RECORD_PLAIN_MAX bytes) under the record key
+// of its kind with nonce, 24 fresh random bytes, and writes the record's
+// sync ciphertext text, the base64url envelope, into output. sealed is
+// scratch of plain.count + 16 bytes. Returns the text's length, or -1 with
+// output cleared.
+SealEntityRecord :: (private_key: []u8, metadata: EntityRecordMetadata, plain: []u8, nonce: []u8,
+    sealed: []u8, output: []u8) -> s64 {
+    if !MetadataValid(metadata) || plain.count < 1 || plain.count > ENTITY_RECORD_PLAIN_MAX ||
+        nonce.count != ENTITY_RECORD_NONCE_BYTES || sealed.count < plain.count + 16 { return -1 }
+    aad_bytes: [512]u8
+    aad := Out.{.bytes = aad_bytes[:]}
+    PutAAD(*aad, metadata)
+    key: [ENTITY_KEY_BYTES]u8
+    defer { Wipe(key[:]) }
+    if aad.length < 0 || !EntityRecordKey(private_key, metadata.kind, key[:]) ||
+        XChaCha20Poly1305Seal(*key[0], *nonce[0], *plain[0], plain.count, *aad_bytes[0], aad.length,
+            *sealed[0], sealed.count) != 1 {
+        Wipe(sealed)
+        return -1
+    }
+    out := Out.{.bytes = output}
+    envelope := Base64.{.out = *out}
+    Base64Text(*envelope, "{\"aad\":")
+    Base64Text(*envelope, TextView(aad_bytes[0:aad.length]))
+    Base64Text(*envelope, ",\"alg\":\"xchacha20poly1305\",\"ciphertext\":\"")
+    Base64Nested(*envelope, sealed[0:plain.count + 16])
+    Base64Text(*envelope, "\",\"key_id\":\"entity-v1\",\"nonce\":\"")
+    Base64Nested(*envelope, nonce)
+    Base64Text(*envelope, "\",\"profile\":\"daochi-record-v1\"}")
+    Base64Flush(*envelope)
+    Wipe(sealed)
+    if out.length < 0 || out.length > ENTITY_RECORD_TEXT_MAX {
+        Wipe(output)
+        return -1
+    }
+    return out.length
+}
+
+// The envelope JSON of a record's sync ciphertext text, decoded into
+// output (3/4 of text.count); its length, or -1.
+EntityRecordEnvelope :: (text: string, output: []u8) -> s64 {
+    if text.count < 1 || text.count > ENTITY_RECORD_TEXT_MAX { return -1 }
+    return Base64Decode(text, output)
+}
+
+// Opens a record's envelope (EntityRecordEnvelope): it must name this
+// account, the entity app, the kind's collection and the record id of
+// metadata (whose schema is ignored), key entity-v1, and authenticate under
+// the kind's record key. The record's schema goes into schema and its plain
+// text into output, which needs room for the sealed bytes (16 more than the
+// plain text); returns the plain length, or -1 with output cleared.
+OpenEntityRecord :: (private_key: []u8, metadata: EntityRecordMetadata, envelope: string,
+    schema: []u8, output: []u8) -> s64 {
+    expected := metadata
+    expected.schema = "x"
+    if !MetadataValid(expected) || envelope.count < 2 || envelope.count >= cast(s64)2147483647 ||
+        Space(envelope, 0) != 0 || envelope[0] != 123 ||
+        Space(envelope, ValueEnd(envelope, 0, 0)) != cast(s32)envelope.count { return -1 }
+    words: [32]u8
+    if StringField(envelope, 0, "profile", words[:]) != "daochi-record-v1" ||
+        StringField(envelope, 0, "alg", words[:]) != "xchacha20poly1305" ||
+        StringField(envelope, 0, "key_id", words[:]) != ENTITY_RECORD_KEY_ID { return -1 }
+    aad_at := FieldAt(envelope, 0, "aad")
+    if aad_at < 0 || envelope[aad_at] != 123 { return -1 }
+    account: [80]u8
+    app: [16]u8
+    collection: [96]u8
+    id: [ENTITY_RECORD_ID_MAX + 1]u8
+    named: [96]u8
+    found: [ENTITY_RECORD_SCHEMA_MAX + 1]u8
+    schema_length := ReadStringText(envelope, FieldAt(envelope, aad_at, "schema"), found[:])
+    if schema_length < 1 || schema.count <= schema_length { return -1 }
+    opened := expected
+    opened.schema = TextView(found[0:schema_length])
+    aad_bytes: [512]u8
+    aad := Out.{.bytes = aad_bytes[:]}
+    PutAAD(*aad, opened)
+    if StringField(envelope, aad_at, "account_id", account[:]) != metadata.account_id ||
+        StringField(envelope, aad_at, "app_id", app[:]) != ENTITY_RECORD_APP ||
+        StringField(envelope, aad_at, "collection", collection[:]) != EntityRecordCollection(metadata.kind, named[:]) ||
+        StringField(envelope, aad_at, "id", id[:]) != metadata.id || !MetadataValid(opened) || aad.length < 0 { return -1 }
+    nonce_span := ReadString(envelope, FieldAt(envelope, 0, "nonce"))
+    cipher_span := ReadString(envelope, FieldAt(envelope, 0, "ciphertext"))
+    nonce: [ENTITY_RECORD_NONCE_BYTES]u8
+    if !nonce_span.valid || !cipher_span.valid ||
+        Base64Decode(envelope[nonce_span.start:nonce_span.end], nonce[:]) != ENTITY_RECORD_NONCE_BYTES { return -1 }
+    // The sealed bytes are decoded into output and opened where they lie.
+    sealed_length := Base64Decode(envelope[cipher_span.start:cipher_span.end], output)
+    key: [ENTITY_KEY_BYTES]u8
+    defer { Wipe(key[:]) }
+    if sealed_length <= 16 || !EntityRecordKey(private_key, metadata.kind, key[:]) ||
+        XChaCha20Poly1305Open(*key[0], *nonce[0], *output[0], sealed_length, *aad_bytes[0], aad.length,
+            *output[0], output.count) != 1 {
+        Wipe(output)
+        return -1
+    }
+    for at: cast(s64)0..schema_length { schema[at] = ifx at < schema_length then found[at] else cast(u8)0 }
+    return sealed_length - 16
 }

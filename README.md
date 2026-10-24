@@ -32,7 +32,9 @@ The protocol modules currently provide:
   native; link libsodium);
 - entity data keys and shared chunks (`entity.zi`): the record key of each kind
   of account data and convergent 8 MiB chunk sealing, so every app of the
-  account stores one copy of each photo or level (Daochi `docs/entity-data.md`);
+  account stores one copy of each photo or level (Daochi `docs/entity-data.md`),
+  and entity records sealed and opened as `daochi-record-v1` envelopes in plain
+  Ziran, without libsodium;
 - polled login, bearer requests, and signed sync operations
   (`async_client.zi`, `async_sync.zi`);
 - resumable record pages, bounded transfer recovery and cursor validation
@@ -46,7 +48,8 @@ The protocol modules currently provide:
   signing, and the plain (`account-key-v1`) and passphrase-encrypted
   (`ksync-account-key-v2`) key files (`keys.zi`, signing through the Oqs
   package);
-- SHA-256, HMAC-SHA-256, PBKDF2, and ChaCha20-Poly1305 (`crypto.zi`).
+- SHA-256, HMAC-SHA-256, PBKDF2, ChaCha20-Poly1305 and XChaCha20-Poly1305
+  (`crypto.zi`).
 
 The application supplies the account signer and body digest; `keys.zi`
 provides both for Daochi account keys (`SignAccountMessage`, `Sha256Hex`), and

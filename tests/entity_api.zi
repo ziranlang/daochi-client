@@ -32,3 +32,21 @@ EntityTestOpen :: (private_key: []u8, kind: string, hash: string, index: s64, se
 EntityTestSha256Hex :: (data: []u8, output: []u8) {
     if data.count > 0 && output.count >= 65 { Sha256Hex(*data[0], data.count, *output[0]) }
 }
+
+#program_export
+EntityTestSealRecord :: (private_key: []u8, account: string, kind: string, id: string, schema: string,
+    plain: []u8, nonce: []u8, sealed: []u8, output: []u8) -> s64 {
+    return SealEntityRecord(private_key, EntityRecordMetadata.{account, kind, id, schema}, plain, nonce, sealed, output)
+}
+
+#program_export
+EntityTestEnvelope :: (text: string, output: []u8) -> s64 { return EntityRecordEnvelope(text, output) }
+
+#program_export
+EntityTestOpenRecord :: (private_key: []u8, account: string, kind: string, id: string, envelope: string,
+    schema: []u8, output: []u8) -> s64 {
+    return OpenEntityRecord(private_key, EntityRecordMetadata.{account, kind, id, ""}, envelope, schema, output)
+}
+
+#program_export
+EntityTestNonceText :: (nonce: []u8, output: []u8) -> s64 { return EntityRecordNonceText(nonce, output).count }

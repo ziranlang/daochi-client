@@ -87,6 +87,7 @@ main(void)
     uint8_t sealed_hex[261];
     uint8_t zero_key[32] = {0};
     uint8_t zero_nonce[12] = {0};
+    uint8_t zero_nonce24[24] = {0};
     const char *aead_plain =
         "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
 
@@ -253,6 +254,40 @@ main(void)
            "89fa0a032d12a347bf8a35f89410006cd961a0f44561bbaefe8e35de69ddb823cca10ed0c23b97bf1f1b5cf349b9a10c4eb59b47c91d8eac2a81e33cac72a0e93952e5e55898e2d253b9fadea6b173a40e"))
         return 1;
 
-    puts("Daochi Ziran SHA-256, HMAC, PBKDF2, ChaCha20-Poly1305 and hex vectors passed");
+    /* draft-irtf-cfrg-xchacha-03 A.3.1, the same bytes libsodium seals. */
+    uint8_t xnonce[24];
+    for(size_t index = 0; index < sizeof(xnonce); index++)
+        xnonce[index] = (uint8_t)(0x40 + index);
+    if(!HexToBytes(StringView("50515253c0c1c2c3c4c5c6c7", 24), aad, sizeof(aad)) ||
+       !XChaCha20Poly1305Seal(aead_key, xnonce,
+           (uint8_t *)aead_plain, sizeof(opened), aad, sizeof(aad),
+           sealed, sizeof(sealed)) ||
+       !BytesToHex(sealed, sizeof(sealed), sealed_hex, sizeof(sealed_hex)) ||
+       strcmp((const char *)sealed_hex,
+           "bd6d179d3e83d43b9576579493c0e939572a1700252bfaccbed2902c21396cbb731c7f1b0b4aa6440bf3a82f4eda7e39ae64c6708c54c216cb96b72e1213b4522f8c9ba40db5d945b11b69b982c1bb9e3f3fac2bc369488f76b2383565d3fff921f9664c97637da9768812f615c68b13b52ec0875924c1c7987947deafd8780acf49") != 0) {
+        fputs("XChaCha20-Poly1305 vector failed\n", stderr);
+        return 1;
+    }
+    memset(opened, 0xa5, sizeof(opened));
+    if(!XChaCha20Poly1305Open(aead_key, xnonce, sealed, sizeof(sealed), aad, sizeof(aad),
+           opened, sizeof(opened)) ||
+       memcmp(opened, aead_plain, sizeof(opened)) != 0) {
+        fputs("XChaCha20-Poly1305 decrypt failed\n", stderr);
+        return 1;
+    }
+    xnonce[23] ^= 1;
+    if(XChaCha20Poly1305Open(aead_key, xnonce, sealed, sizeof(sealed), aad, sizeof(aad),
+           opened, sizeof(opened))) {
+        fputs("XChaCha20-Poly1305 accepted another nonce\n", stderr);
+        return 1;
+    }
+    if(!XChaCha20Poly1305Seal(zero_key, zero_nonce24, NULL, 0, NULL, 0, sealed, 16) ||
+       !BytesToHex(sealed, 16, sealed_hex, sizeof(sealed_hex)) ||
+       strcmp((const char *)sealed_hex, "8f3b945a51906dc8600de9f8962d00e6") != 0) {
+        fputs("XChaCha20-Poly1305 empty input failed\n", stderr);
+        return 1;
+    }
+
+    puts("Daochi Ziran SHA-256, HMAC, PBKDF2, ChaCha20-Poly1305, XChaCha20-Poly1305 and hex vectors passed");
     return 0;
 }

@@ -17,6 +17,13 @@
 #define CHUNK0_ADDRESS "01679c4afcf6758f046775113d544a72d56dd38d4ce4165c73e26feb63338d83"
 #define CHUNK1_ADDRESS "aa3d34eb39c53546a30c18e1415cbe8c749b565a3b60a4709d7fc6ff9efa1471"
 #define CHUNK_BYTES 8388608
+/* A level record sealed by Python with libsodium's XChaCha20-Poly1305:
+ * the levels record key, nonce 10..27 and this plain text. */
+#define RECORD_ACCOUNT "9af211329b2fc82e5efe906062c730082819b23fe8394bc435e0b1bf0458eb54"
+#define RECORD_ID "0123456789abcdef0123456789abcdef"
+#define RECORD_PLAIN "{\"format\":\"shovey-levels-1\",\"edition\":\"classic\",\"title\":\"One\",\"levels\":[],\"updated_at\":1792800000}"
+#define RECORD_NONCE "EBESExQVFhcYGRobHB0eHyAhIiMkJSYn"
+#define RECORD_TEXT "eyJhYWQiOnsiYWNjb3VudF9pZCI6IjlhZjIxMTMyOWIyZmM4MmU1ZWZlOTA2MDYyYzczMDA4MjgxOWIyM2ZlODM5NGJjNDM1ZTBiMWJmMDQ1OGViNTQiLCJhcHBfaWQiOiJlbnRpdHkiLCJjb2xsZWN0aW9uIjoicHJpdmF0ZS5lbnRpdHkudjEubGV2ZWxzIiwiaWQiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsInNjaGVtYSI6ImVudGl0eS5sZXZlbHMudjEifSwiYWxnIjoieGNoYWNoYTIwcG9seTEzMDUiLCJjaXBoZXJ0ZXh0Ijoic3ZCUmJ6TVM5aUItbnlwS05QTUVDQXp1Sng4OExHTkhDazVEWVowalNZYzNCUFpKVFdZSjFVU1JXUHNXYzBKVmx0Z25EOWtFYXQ2ODE5WjZZaWh0eEp4cG5LeF9zMGpLcDctSnBMZWVNRlRjd2hGYzJhZV9UZ3AwSjRYM1hITzhQN0VvNk9hRVRMS0pIa1ZURU5MX3ZQZlIiLCJrZXlfaWQiOiJlbnRpdHktdjEiLCJub25jZSI6IkVCRVNFeFFWRmhjWUdSb2JIQjBlSHlBaElpTWtKU1luIiwicHJvZmlsZSI6ImRhb2NoaS1yZWNvcmQtdjEifQ"
 
 static Slice bytes(void *data, size_t size)
 {
@@ -104,6 +111,50 @@ int main(void)
     free(sealed);
     free(again);
     free(opened);
-    puts("Entity record keys and chunked shared blobs passed");
+
+    /* Records: the daochi-record-v1 envelope as the sync request carries it. */
+    unsigned char nonce[24], scratch[1024], text_out[2048], envelope[2048], record[512], schema[129];
+    for (size_t i = 0; i < sizeof nonce; i++) nonce[i] = (unsigned char)(0x10 + i);
+    char nonce_text[40] = {0};
+    assert(EntityTestNonceText(bytes(nonce, 24), bytes(nonce_text, sizeof nonce_text)) == 32);
+    assert(memcmp(nonce_text, RECORD_NONCE, 32) == 0);
+    size_t plain_size = strlen(RECORD_PLAIN);
+    int64_t text_size = EntityTestSealRecord(account, StringLiteral(RECORD_ACCOUNT), StringLiteral("levels"),
+        StringLiteral(RECORD_ID), StringLiteral("entity.levels.v1"), bytes(RECORD_PLAIN, plain_size),
+        bytes(nonce, 24), bytes(scratch, sizeof scratch), bytes(text_out, sizeof text_out));
+    assert(text_size == (int64_t)strlen(RECORD_TEXT));
+    assert(memcmp(text_out, RECORD_TEXT, (size_t)text_size) == 0);
+    int64_t envelope_size = EntityTestEnvelope(StringView((const char *)text_out, (size_t)text_size),
+        bytes(envelope, sizeof envelope));
+    assert(envelope_size > 0);
+    String sealed_envelope = StringView((const char *)envelope, (size_t)envelope_size);
+    memset(schema, 0x55, sizeof schema);
+    int64_t record_size = EntityTestOpenRecord(account, StringLiteral(RECORD_ACCOUNT), StringLiteral("levels"),
+        StringLiteral(RECORD_ID), sealed_envelope, bytes(schema, sizeof schema), bytes(record, sizeof record));
+    assert(record_size == (int64_t)plain_size && memcmp(record, RECORD_PLAIN, plain_size) == 0);
+    assert(strcmp((const char *)schema, "entity.levels.v1") == 0);
+    /* Another account, kind, record or key, or a changed byte, never opens. */
+    assert(EntityTestOpenRecord(account, StringLiteral(SMALL_HASH), StringLiteral("levels"),
+        StringLiteral(RECORD_ID), sealed_envelope, bytes(schema, sizeof schema), bytes(record, sizeof record)) == -1);
+    assert(EntityTestOpenRecord(account, StringLiteral(RECORD_ACCOUNT), StringLiteral("photos"),
+        StringLiteral(RECORD_ID), sealed_envelope, bytes(schema, sizeof schema), bytes(record, sizeof record)) == -1);
+    assert(EntityTestOpenRecord(account, StringLiteral(RECORD_ACCOUNT), StringLiteral("levels"),
+        StringLiteral("0123456789abcdef0123456789abcdee"), sealed_envelope, bytes(schema, sizeof schema),
+        bytes(record, sizeof record)) == -1);
+    private_key[7] ^= 1;
+    assert(EntityTestOpenRecord(account, StringLiteral(RECORD_ACCOUNT), StringLiteral("levels"),
+        StringLiteral(RECORD_ID), sealed_envelope, bytes(schema, sizeof schema), bytes(record, sizeof record)) == -1);
+    private_key[7] ^= 1;
+    char *cipher = strstr((char *)envelope, "\"ciphertext\":\"");
+    assert(cipher != NULL && (unsigned char *)cipher < envelope + envelope_size);
+    cipher[20] = cipher[20] == 'A' ? 'B' : 'A';
+    assert(EntityTestOpenRecord(account, StringLiteral(RECORD_ACCOUNT), StringLiteral("levels"),
+        StringLiteral(RECORD_ID), sealed_envelope, bytes(schema, sizeof schema), bytes(record, sizeof record)) == -1);
+    for (size_t i = 0; i < plain_size; i++) assert(record[i] == 0);
+    /* The node keeps at most 256 KiB of ciphertext text per record. */
+    assert(EntityTestSealRecord(account, StringLiteral(RECORD_ACCOUNT), StringLiteral("levels"),
+        StringLiteral(RECORD_ID), StringLiteral("entity.levels.v1"), bytes(RECORD_PLAIN, plain_size),
+        bytes(nonce, 24), bytes(scratch, sizeof scratch), bytes(text_out, 100)) == -1);
+    puts("Entity record keys, records and chunked shared blobs passed");
     return 0;
 }
