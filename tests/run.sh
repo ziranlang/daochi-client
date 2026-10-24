@@ -23,9 +23,9 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 "$compiler" --no-main --root "$root" \
     --module-path "$ziran/std" -o "$work/generated" \
     "$root/client.zi" "$root/transaction.zi" "$root/sync.zi" \
-    "$root/social.zi" "$root/account.zi" "$root/events.zi"
+    "$root/social.zi" "$root/account.zi" "$root/events.zi" "$root/rewards.zi"
 
-for test in wire auth url client transaction sync social account events; do
+for test in wire auth url client transaction sync social account events rewards; do
     "${CC:-cc}" -std=c11 -O0 -Wall -Wextra -Werror \
         -Wno-unused-function -Wno-unused-variable \
         -I"$ziran/include" -I"$work/generated" \
@@ -34,7 +34,7 @@ for test in wire auth url client transaction sync social account events; do
         "$work/generated/url.c" "$work/generated/wire.c" \
         "$work/generated/transaction.c" "$work/generated/sync.c" \
         "$work/generated/social.c" "$work/generated/account.c" \
-        "$work/generated/events.c" \
+        "$work/generated/events.c" "$work/generated/rewards.c" "$work/generated/async_client.c" \
         "$work/generated/json_scan.c" "$work/generated/text_buffer.c" \
         "$work/generated/text.c" \
         -o "$work/${test}_test"

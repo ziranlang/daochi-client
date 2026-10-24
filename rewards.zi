@@ -1,0 +1,122 @@
+// Rewards an account claims from its node, such as a game's secret chest.
+// The node keeps the catalog and gives each reward to an account once: a
+// client names only the reward, never an amount, and reads back whether this
+// claim credited it. Claiming again is safe and credits nothing.
+#import "client"
+#import "async_client"
+#import "auth"
+#import "wire"
+#import "net_http"
+#import "text_buffer"
+
+REWARDS_PATH :: "/api/v1/rewards"
+
+RewardClaim :: struct {
+    // Dew in integer millionths: what the reward gives, and the account's
+    // balance after the claim.
+    units: s64
+    balance: s64
+    // Whether this claim credited the account; false when it had the reward.
+    credited: bool
+}
+
+#scope_export
+// A reward name as the node accepts one: 1 to 64 letters, digits, '.', '_',
+// ':' or '-'.
+#program_export
+RewardNameValid :: (reward: string) -> bool {
+    if reward.count < 1 || reward.count > 64 { return false }
+    for byte: reward {
+        letter := (byte >= cast(u8)65 && byte <= cast(u8)90) || (byte >= cast(u8)97 && byte <= cast(u8)122)
+        digit := byte >= cast(u8)48 && byte <= cast(u8)57
+        mark := byte == cast(u8)46 || byte == cast(u8)95 || byte == cast(u8)58 || byte == cast(u8)45
+        if !letter && !digit && !mark { return false }
+    }
+    return true
+}
+
+// The claim's request body, {"reward":"…"}; false for a name the node refuses.
+#program_export
+BuildRewardBody :: (reward: string, output: []u8) -> bool {
+    if output.count == 0 { return false }
+    output[0] = cast(u8)0
+    if !RewardNameValid(reward) { return false }
+    writer: Writer = Writer.{output, 0, true}
+    writer = WriteText(writer, "{\"reward\":")
+    writer = AppendJsonQuoted(writer, reward)
+    writer = WriteByte(writer, cast(u8)125)
+    if !writer.valid {
+        output[0] = cast(u8)0
+        return false
+    }
+    return true
+}
+
+// The node's answer to a claim, {"reward","units","credited","balance"}.
+#program_export
+ParseRewardClaim :: (json: string, claim: *RewardClaim) -> bool {
+    if claim == null || !ValidJson(json) { return false }
+    units := FieldNumber(json, "units", -1)
+    balance := FieldNumber(json, "balance", -1)
+    if units <= 0 || balance < 0 { return false }
+    credited := TextFind(json, "\"credited\":true")
+    if !credited && !TextFind(json, "\"credited\":false") { return false }
+    claim.units = units
+    claim.balance = balance
+    claim.credited = credited
+    return true
+}
+
+// Claims a reward, waiting for the node's answer in output.
+#program_export
+ClaimReward :: (client: Client, session: *Session, now: s64,
+    reward: string, output: []u8, status: *s32) -> AuthResult {
+    body: [128]u8
+    if !BuildRewardBody(reward, body[:]) {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    return BearerRequest(client, session, now, "POST", REWARDS_PATH,
+        TextUntilNul(body[:]), output, status)
+}
+
+// A claim advanced without blocking the host's event loop, with its own
+// request body and the node's answer.
+PendingReward :: struct {
+    request: PendingRequest
+    body: [128]u8
+    answer: [1024]u8
+}
+
+// Starts a claim without blocking; false when the reward name is refused.
+BeginRewardClaim :: (pending: *PendingReward, client: Client,
+    session: *Session, now: s64, transport: AsyncTransport, reward: string) -> bool {
+    if pending == null { return false }
+    built: [128]u8
+    if !BuildRewardBody(reward, built[:]) { return false }
+    pending.body = built
+    empty: [1]HttpHeader
+    return BeginRequest(*pending.request, client, session, now, transport, "POST",
+        REWARDS_PATH, TextUntilNul(pending.body[:]), pending.answer[:], empty[0:0])
+}
+
+// Advances a claim; true once it has finished. A finished claim the node
+// answered fills `claim` and reports whether it credited the account.
+PollRewardClaim :: (pending: *PendingReward, claim: *RewardClaim) -> bool {
+    if pending == null { return true }
+    if !PollRequest(*pending.request) { return false }
+    if pending.request.result != cast(AuthResult)AuthResult.AUTH_OK || pending.request.status != 200 ||
+    !ParseRewardClaim(TextUntilNul(pending.answer[:]), claim) {
+        claim.* = RewardClaim.{}
+    }
+    return true
+}
+
+#scope_file
+TextFind :: (text: string, part: string) -> bool {
+    at: s64 = 0
+    while at + part.count <= text.count {
+        if text[at:at + part.count] == part { return true }
+        at += 1
+    }
+    return false
+}
