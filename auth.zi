@@ -24,12 +24,25 @@ Identity :: struct {
     signing_context: *void
 }
 
+// Public registration metadata only. A cache never replaces the server's
+// account/device signatures, revocation checks or transaction replay checks.
+Registration :: struct {
+    server: [512]u8
+    account: [65]u8
+    app: [65]u8
+    client: [129]u8
+    device: [65]u8
+    public_key: [65]u8
+    expires_at: s64
+}
+
 Session :: struct {
     token: [4096]u8
     expires_in_seconds: s64
     server_time: s64
     expires_at_local: s64
     login_local_time: s64
+    registration: Registration
 }
 
 DigestBody :: #type (body: string, output: []u8) -> bool #c_call;

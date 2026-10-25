@@ -42,7 +42,7 @@ for test in wire auth url client transaction sync social account events rewards;
         "$work/generated/social.c" "$work/generated/account.c" \
         "$work/generated/events.c" "$work/generated/rewards.c" "$work/generated/async_client.c" \
         "$work/generated/json_scan.c" "$work/generated/text_buffer.c" \
-        "$work/generated/text.c" \
+        "$work/generated/text.c" "$work/generated/c_string.c" \
         -o "$work/${test}_test"
     env -u DISPLAY -u WAYLAND_DISPLAY "$work/${test}_test"
 done

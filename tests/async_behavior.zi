@@ -40,6 +40,8 @@ flow_applied: s32;
 flow_bytes: s64;
 flow_state: SyncPageState;
 flow_download_only: bool;
+missing_device: bool;
+reject_registration: bool;
 
 
 Contains :: (text: string, part: string) -> bool {
@@ -147,6 +149,11 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
         !Contains(request.body, "\"expires_at\":1700000300") {
             bad_request = true
         }
+        if reject_registration {
+            status = 409
+        } else {
+            missing_device = false
+        }
         return CopyCString("{}", output)
     }
     syncs += 1
@@ -205,6 +212,10 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
         status = 401
         return CopyCString("{}", output)
     }
+    if missing_device {
+        status = 401
+        return CopyCString("{\"error\":\"device key not registered\"}", output)
+    }
     return CopyCString("{\"server_version\":7}", output)
 }
 
@@ -257,6 +268,73 @@ Reset :: () {
     flow_bytes = 0
     flow_state = SyncPageState.{}
     flow_download_only = false
+    missing_device = false
+    reject_registration = false
+}
+
+RunCachedSync :: (client: Client, session: *Session, device: Device, transport: AsyncTransport) -> AuthResult {
+    pending: PendingSync
+    output: [256]u8
+    if !BeginSync(*pending, client, session, device, 1000, null, Nonce, transport,
+        "{\"protocol_version\":6}", output[:]) {
+        return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
+    }
+    steps: s32 = 0
+    while !PollSync(*pending) && steps < 60 {
+        steps += 1
+    }
+    if steps >= 60 || bad_request || active {
+        return cast(AuthResult)AuthResult.AUTH_PAYLOAD_FAILED
+    }
+    return pending.result
+}
+
+CheckRegistrationCache :: (client: Client, device: Device, transport: AsyncTransport) -> s32 {
+    Reset()
+    session: Session
+    if RunCachedSync(client, *session, device, transport) != cast(AuthResult)AuthResult.AUTH_OK || registrations != 1 {
+        return 80
+    }
+    Reset()
+    if RunCachedSync(client, *session, device, transport) != cast(AuthResult)AuthResult.AUTH_OK ||
+        registrations != 0 || calls != 1 || account_signs != 1 || device_signs != 1 || nonces != 2 {
+        return 81
+    }
+    saved: [1536]u8
+    restored: Registration
+    if !WriteRegistration(*session.registration, saved[:]) || !ReadRegistration(TextUntilNul(saved[:]), *restored) {
+        return 82
+    }
+    session.registration = restored
+    if !RegistrationCurrent(client, *session, device, 1000) || RegistrationCurrent(client, *session, device, 4600) ||
+        RegistrationCurrent(client, *session, device, -1) {
+        return 83
+    }
+    for field: cast(s32)0..5 {
+        other := client
+        changed := device
+        if field == 0 { other.server_url = "http://127.0.0.1:8081" }
+        if field == 1 { other.identity.account_id = "other-account" }
+        if field == 2 { other.app_id = "other-app" }
+        if field == 3 { other.identity.client_id = "other-client" }
+        if field == 4 { changed.key_id = "other-device" }
+        if field == 5 { changed.public_key_hex = "other-public-key" }
+        if RegistrationCurrent(other, *session, changed, 1000) { return 84 }
+    }
+    Reset()
+    missing_device = true
+    if RunCachedSync(client, *session, device, transport) != cast(AuthResult)AuthResult.AUTH_OK ||
+        registrations != 1 || syncs != 3 || calls > 8 {
+        return 85
+    }
+    Reset()
+    missing_device = true
+    reject_registration = true
+    if RunCachedSync(client, *session, device, transport) != cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED ||
+        registrations != 1 || syncs != 2 || calls > 8 {
+        return 86
+    }
+    return 0
 }
 
 FlowFailure :: (context: *void) -> s32 {
@@ -410,6 +488,8 @@ main :: () -> s32 {
     transport.start = Start
     transport.poll = Poll
     transport.cancel = Cancel
+    cache_result := CheckRegistrationCache(client, device, transport)
+    if cache_result != 0 { return cache_result }
     session: Session
     pending: PendingSync
     output: [256]u8

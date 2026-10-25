@@ -61,6 +61,16 @@ store and keeps platform transport outside the protocol core. Applications
 persist `Session` if they want bearer tokens to survive restart. Account keys
 must remain when a bearer token expires.
 
+`Session.registration` remembers one successful device registration for up to
+an hour between successful requests, scoped to the normalized node URL,
+account, app, client, device key ID and public key. Sync then sends only its
+signed transaction. The node still verifies both signatures and revocation on
+every request. A missing-device response permits one fresh registration and
+a newly signed transaction; revoked devices cannot register again. Clearing or
+renewing the bearer session clears the hint. Hosts may save this public metadata
+with `WriteRegistration` and restore it with `ReadRegistration`; it contains no
+private key or bearer token.
+
 Import the package modules with `#import "daochi_client/client"` and
 `#import "daochi_client/sync"`. Set `Client.app_id`, supply a `Device` with a
 persisted Ed25519 key and signer, and supply a cryptographically random 64-digit

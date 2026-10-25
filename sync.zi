@@ -6,6 +6,9 @@
 #import "wire"
 #import "net_http"
 #import "text_buffer"
+#import "url"
+#import "c_string"
+#import "json_scan"
 
 RandomNonce :: #type (context: *void, output: []u8) -> bool #c_call;
 
@@ -14,6 +17,88 @@ Device :: struct {
     public_key_hex: string
     signing_context: *void
     signer: SignMessage
+}
+
+RegistrationCurrent :: (client: Client, session: *Session, device: Device, now: s64) -> bool {
+    if session == null || now < 0 || session.registration.expires_at <= now ||
+        session.registration.expires_at - now > 3600 {
+        return false
+    }
+    server: [512]u8
+    cached := *session.registration
+    return NormalizeUrl(client.server_url, server[:]) &&
+        TextUntilNul(server[:]) == TextUntilNul(cached.server[:]) &&
+        client.identity.account_id == TextUntilNul(cached.account[:]) &&
+        client.app_id == TextUntilNul(cached.app[:]) &&
+        client.identity.client_id == TextUntilNul(cached.client[:]) &&
+        device.key_id == TextUntilNul(cached.device[:]) &&
+        device.public_key_hex == TextUntilNul(cached.public_key[:])
+}
+
+RememberRegistration :: (client: Client, session: *Session, device: Device, now: s64) {
+    if session == null {
+        return
+    }
+    session.registration = Registration.{}
+    cached := *session.registration
+    if now < 0 || now > 9007199254740991 - 3600 ||
+        !NormalizeUrl(client.server_url, cached.server[:]) ||
+        !CopyCString(client.identity.account_id, cached.account[:]) ||
+        !CopyCString(client.app_id, cached.app[:]) ||
+        !CopyCString(client.identity.client_id, cached.client[:]) ||
+        !CopyCString(device.key_id, cached.device[:]) ||
+        !CopyCString(device.public_key_hex, cached.public_key[:]) {
+        session.registration = Registration.{}
+        return
+    }
+    cached.expires_at = now + 3600
+}
+
+MissingRegisteredDevice :: (status: s32, response: string) -> bool {
+    error: [128]u8
+    return status == 401 && ValidJson(response) &&
+        ReadStringText(response, FieldAt(response, 0, "error"), error[:]) >= 0 &&
+        TextUntilNul(error[:]) == "device key not registered"
+}
+
+// Apps may persist this public hint alongside their bearer session. Cache
+// readers validate every scope again before it can skip a registration.
+WriteRegistration :: (registration: *Registration, output: []u8) -> bool {
+    writer := Writer.{.output = output, .valid = true}
+    writer = WriteByte(writer, 123)
+    names: [6]string = .["server", "account", "app", "client", "device", "public_key"]
+    values: [6]string = .[TextUntilNul(registration.server[:]), TextUntilNul(registration.account[:]),
+        TextUntilNul(registration.app[:]), TextUntilNul(registration.client[:]),
+        TextUntilNul(registration.device[:]), TextUntilNul(registration.public_key[:])]
+    for name, index: names {
+        writer = AppendJsonQuoted(writer, name)
+        writer = WriteByte(writer, 58)
+        writer = AppendJsonQuoted(writer, values[index])
+        writer = WriteByte(writer, 44)
+    }
+    writer = WriteText(writer, "\"expires_at\":")
+    writer = WriteDecimal(writer, registration.expires_at)
+    writer = WriteByte(writer, 125)
+    return writer.valid
+}
+
+ReadRegistration :: (text: string, registration: *Registration) -> bool {
+    registration.* = Registration.{}
+    candidate: Registration
+    if !FieldText(text, "server", candidate.server[:]) ||
+        !FieldText(text, "account", candidate.account[:]) ||
+        !FieldText(text, "app", candidate.app[:]) ||
+        !FieldText(text, "client", candidate.client[:]) ||
+        !FieldText(text, "device", candidate.device[:]) ||
+        !FieldText(text, "public_key", candidate.public_key[:]) {
+        return false
+    }
+    candidate.expires_at = FieldNumber(text, "expires_at", 0)
+    if candidate.expires_at <= 0 {
+        return false
+    }
+    registration.* = candidate
+    return true
 }
 
 SignatureHex :: (value: string, length: s64) -> bool {
@@ -69,9 +154,13 @@ RegisterDevice :: (client: Client, session: *Session,
     }
     response: [2048]u8
     status: s32 = 0
-    return BearerRequest(client, session, now, "POST",
+    result := BearerRequest(client, session, now, "POST",
         "/api/v1/account/devices", TextUntilNul(body[:]),
         response[:], *status)
+    if result == cast(AuthResult)AuthResult.AUTH_OK {
+        RememberRegistration(client, session, device, now)
+    }
+    return result
 }
 
 #scope_export
@@ -84,22 +173,39 @@ Sync :: (client: Client, session: *Session, device: Device,
     }
     output[0] = cast(u8)0
     status.* = 0
-    registered := RegisterDevice(client, session, device, now,
-        random_context, random)
-    if registered != cast(AuthResult)AuthResult.AUTH_OK {
-        return registered
+    ready := EnsureSession(client, session, now)
+    if ready != cast(AuthResult)AuthResult.AUTH_OK {
+        return ready
     }
-    transaction_header: [8192]u8
-    prepared := PrepareSyncHeader(client, session, device, now,
-        random_context, random, body, transaction_header[:])
-    if prepared != cast(AuthResult)AuthResult.AUTH_OK {
-        return prepared
+    cached := RegistrationCurrent(client, session, device, now)
+    for attempt: cast(s32)0..1 {
+        if !cached || attempt > 0 {
+            registered := RegisterDevice(client, session, device, now, random_context, random)
+            if registered != cast(AuthResult)AuthResult.AUTH_OK {
+                return registered
+            }
+        }
+        transaction_header: [8192]u8
+        prepared := PrepareSyncHeader(client, session, device, now,
+            random_context, random, body, transaction_header[:])
+        if prepared != cast(AuthResult)AuthResult.AUTH_OK {
+            return prepared
+        }
+        extra: [1]HttpHeader
+        extra[0].name = "X-Daochi-Tx"
+        extra[0].value = TextUntilNul(transaction_header[:])
+        result := BearerRequestWithHeaders(client, session, now,
+            "POST", "/api/v1/sync", body, output, status, extra[:])
+        if result == cast(AuthResult)AuthResult.AUTH_OK {
+            RememberRegistration(client, session, device, now)
+            return result
+        }
+        if !cached || attempt > 0 || !MissingRegisteredDevice(status.*, TextUntilNul(output)) {
+            return result
+        }
+        session.registration = Registration.{}
     }
-    extra: [1]HttpHeader
-    extra[0].name = "X-Daochi-Tx"
-    extra[0].value = TextUntilNul(transaction_header[:])
-    return BearerRequestWithHeaders(client, session, now,
-        "POST", "/api/v1/sync", body, output, status, extra[:])
+    return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
 }
 
 // Shared request preparation for blocking and frame-driven transports.

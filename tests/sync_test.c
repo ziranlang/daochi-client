@@ -31,7 +31,7 @@ static bool account_sign(void *context, String message, Slice output)
         assert(strstr(message.data, "\ninbe\n") != NULL);
         assert(strstr(message.data, "\n1700000300\n") != NULL);
     } else {
-        assert(server->account_signs == 3);
+        assert(server->account_signs == 3 || server->account_signs == 4);
         assert(memcmp(message.data, "daochi-tx-v1\n6\n", 15) == 0);
         assert(strstr(message.data, "\nPOST\n/api/v1/sync\n") != NULL);
         assert(strstr(message.data, "\n1700000300\n") != NULL);
@@ -46,7 +46,7 @@ static bool device_sign(void *context, String message, Slice output)
 {
     FakeServer *server = context;
     ++server->device_signs;
-    assert(server->device_signs == 1);
+    assert(server->device_signs <= 2);
     assert(memcmp(message.data, "daochi-tx-v1\n6\n", 15) == 0);
     assert(output.length >= 129);
     memset(output.data, 'd', 128);
@@ -58,7 +58,7 @@ static bool nonce(void *context, Slice output)
 {
     FakeServer *server = context;
     ++server->nonces;
-    assert(server->nonces <= 3 && output.length >= 65);
+    assert(server->nonces <= 5 && output.length >= 65);
     memset(output.data, '0' + server->nonces, 64);
     ((char *)output.data)[64] = 0;
     return true;
@@ -89,15 +89,16 @@ static bool send_request(void *context, HttpRequest request,
         assert(strstr(request.body.data, "\"expires_at\":1700000300") != NULL);
         strcpy(output.data, "{}");
         break;
-    case 4: {
+    case 4:
+    case 5: {
         assert(strstr(request.url.data, "/api/v1/sync") != NULL);
         assert(request.headers.length == 3);
         const HttpHeader *headers = request.headers.data;
         assert(headers[2].name.length == 11);
         assert(memcmp(headers[2].name.data, "X-Daochi-Tx", 11) == 0);
         assert(strstr(headers[2].value.data, "\"protocol_version\":6") != NULL);
-        assert(strstr(headers[2].value.data, "\"tx_id\":\"222222") != NULL);
-        assert(strstr(headers[2].value.data, "\"nonce\":\"333333") != NULL);
+        assert(strstr(headers[2].value.data, server->stage == 4 ? "\"tx_id\":\"222222" : "\"tx_id\":\"444444") != NULL);
+        assert(strstr(headers[2].value.data, server->stage == 4 ? "\"nonce\":\"333333" : "\"nonce\":\"555555") != NULL);
         assert(strstr(headers[2].value.data, "\"body_sha256\":\"ffffff") != NULL);
         assert(strstr(headers[2].value.data, "\"device_signature\":\"dddddd") != NULL);
         assert(request.body.length == 22);
@@ -302,6 +303,11 @@ int main(void)
     assert(server.account_signs == 3 && server.device_signs == 1);
     assert(server.nonces == 3);
     assert(strcmp(response, "{\"server_version\":7}") == 0);
+    result = Sync(client, &session, device, 1000, &server, nonce,
+        StringLiteral("{\"protocol_version\":6}"),
+        (Slice){.data = response, .length = sizeof response}, &status);
+    assert(result == AuthResult_AUTH_OK && status == 200 && server.stage == 5);
+    assert(server.account_signs == 4 && server.device_signs == 2 && server.nonces == 5);
     check_request_preparation(client, device);
     puts("Daochi Ziran signed sync passed");
     return 0;
