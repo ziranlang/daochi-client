@@ -61,6 +61,13 @@ MissingRegisteredDevice :: (status: s32, response: string) -> bool {
         TextUntilNul(error[:]) == "device key not registered"
 }
 
+ReplayedSyncTransaction :: (status: s32, response: string) -> bool {
+    error: [128]u8
+    return status == 409 && ValidJson(response) &&
+        ReadStringText(response, FieldAt(response, 0, "error"), error[:]) >= 0 &&
+        TextUntilNul(error[:]) == "signed transaction replay"
+}
+
 // Apps may persist this public hint alongside their bearer session. Cache
 // readers validate every scope again before it can skip a registration.
 WriteRegistration :: (registration: *Registration, output: []u8) -> bool {
@@ -178,12 +185,15 @@ Sync :: (client: Client, session: *Session, device: Device,
         return ready
     }
     cached := RegistrationCurrent(client, session, device, now)
-    for attempt: cast(s32)0..1 {
-        if !cached || attempt > 0 {
-            registered := RegisterDevice(client, session, device, now, random_context, random)
-            if registered != cast(AuthResult)AuthResult.AUTH_OK {
-                return registered
+    registered := cached
+    registration_retried := false
+    for attempt: cast(s32)0..2 {
+        if !registered {
+            registration_result := RegisterDevice(client, session, device, now, random_context, random)
+            if registration_result != cast(AuthResult)AuthResult.AUTH_OK {
+                return registration_result
             }
+            registered = true
         }
         transaction_header: [8192]u8
         prepared := PrepareSyncHeader(client, session, device, now,
@@ -200,10 +210,19 @@ Sync :: (client: Client, session: *Session, device: Device,
             RememberRegistration(client, session, device, now)
             return result
         }
-        if !cached || attempt > 0 || !MissingRegisteredDevice(status.*, TextUntilNul(output)) {
+        if attempt < 2 && ReplayedSyncTransaction(status.*, TextUntilNul(output)) {
+            // A transport may transparently retry a reused connection after
+            // the original sync committed. Keep replay rejection and recover
+            // the idempotent sync with fresh account/device signatures.
+            continue
+        }
+        if !cached || registration_retried || attempt >= 2 ||
+            !MissingRegisteredDevice(status.*, TextUntilNul(output)) {
             return result
         }
         session.registration = Registration.{}
+        registered = false
+        registration_retried = true
     }
     return cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED
 }

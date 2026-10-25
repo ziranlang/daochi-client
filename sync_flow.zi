@@ -103,9 +103,9 @@ BuildSyncPageRequest :: (body: string, state: *SyncPageState, limit: s32, output
         writer = WriteByte(writer, cast(u8)(48 + (limit / 10) % 10))
     }
     writer = WriteByte(writer, cast(u8)(48 + limit % 10))
-    fields: [10]string = .{"protocol_version", "app_id", "user_id_hash", "client_id",
-        "public_key", "since_server_version", "client_clock", "client_capabilities",
-        "encrypted_records", "public_id"}
+    fields: [11]string = .{"protocol_version", "app_id", "user_id_hash", "client_id",
+        "since_server_version", "client_clock", "client_capabilities",
+        "encrypted_records", "public_id", "include_metadata", "record_encoding"}
     index: s32 = 0
     while index < fields.count {
         value := SyncJsonValue(body, 0, fields[index])

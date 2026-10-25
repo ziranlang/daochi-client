@@ -42,6 +42,7 @@ flow_state: SyncPageState;
 flow_download_only: bool;
 missing_device: bool;
 reject_registration: bool;
+replay_syncs: s32;
 
 
 Contains :: (text: string, part: string) -> bool {
@@ -157,6 +158,11 @@ Start :: (context: *void, request: HttpRequest, output: []u8) -> bool {
         return CopyCString("{}", output)
     }
     syncs += 1
+    if replay_syncs > 0 {
+        replay_syncs -= 1
+        status = 409
+        return CopyCString("{\"error\":\"signed transaction replay\"}", output)
+    }
     if flow_mode {
         flow_failure = 0
         if !Contains(request.body, "\"encrypted_records_only\":true") {
@@ -270,6 +276,7 @@ Reset :: () {
     flow_download_only = false
     missing_device = false
     reject_registration = false
+    replay_syncs = 0
 }
 
 RunCachedSync :: (client: Client, session: *Session, device: Device, transport: AsyncTransport) -> AuthResult {
@@ -320,6 +327,18 @@ CheckRegistrationCache :: (client: Client, device: Device, transport: AsyncTrans
         if field == 4 { changed.key_id = "other-device" }
         if field == 5 { changed.public_key_hex = "other-public-key" }
         if RegistrationCurrent(other, *session, changed, 1000) { return 84 }
+    }
+    Reset()
+    replay_syncs = 1
+    if RunCachedSync(client, *session, device, transport) != cast(AuthResult)AuthResult.AUTH_OK ||
+        registrations != 0 || syncs != 2 || nonces != 4 {
+        return 87
+    }
+    Reset()
+    replay_syncs = 5
+    if RunCachedSync(client, *session, device, transport) != cast(AuthResult)AuthResult.AUTH_REQUEST_FAILED ||
+        registrations != 0 || syncs != 3 || nonces != 6 {
+        return 88
     }
     Reset()
     missing_device = true

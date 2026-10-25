@@ -155,6 +155,12 @@ PollSync :: (pending: *PendingSync) -> bool {
         pending.status = pending.request.status
     }
     if pending.request.result != cast(AuthResult)AuthResult.AUTH_OK {
+        if pending.stage == 3 && pending.transfer_retries < 2 &&
+            ReplayedSyncTransaction(pending.request.status, TextUntilNul(pending.output)) {
+            pending.transfer_retries += 1
+            StartSyncTransaction(pending)
+            return pending.done
+        }
         if pending.stage == 3 && pending.cached_registration && !pending.registration_retried &&
             MissingRegisteredDevice(pending.request.status, TextUntilNul(pending.output)) {
             pending.registration_retried = true
