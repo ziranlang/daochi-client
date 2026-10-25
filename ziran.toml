@@ -35,3 +35,7 @@ wire = "wire.zi"
 [dependencies.oqs]
 git = "https://github.com/ziranlang/oqs.git"
 ref = "master"
+
+[dependencies.crypto]
+git = "https://github.com/ziranlang/crypto.git"
+ref = "master"

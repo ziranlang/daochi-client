@@ -17,10 +17,18 @@
       "name": "Oqs",
       "ref": "master",
       "url": "https://github.com/ziranlang/oqs.git"
+    },
+    {
+      "commit": "944826f70779a6b6cd53f6b06a75b36f4d8a2558",
+      "dependencies": {},
+      "id": "pf039d7a776333200",
+      "name": "crypto",
+      "ref": "master",
+      "url": "https://github.com/ziranlang/crypto.git"
     }
   ],
   "root": {
-    "dependencies": {"oqs": "p7098ac9cd92f7e5f"},
+    "dependencies": {"crypto": "pf039d7a776333200", "oqs": "p7098ac9cd92f7e5f"},
     "name": "DaochiClient"
   },
   "toolchain": {
