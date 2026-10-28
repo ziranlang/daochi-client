@@ -73,6 +73,13 @@ int main(void)
     assert(session.expires_in_seconds == 1800);
     assert(session.server_time == 1700000000);
 
+    result = AcceptLogin(200, StringLiteral("{\"auth_token\":\"token\",\"account_alias\":\"live_tester\"}"), &session);
+    assert(result == AuthResult_AUTH_OK && session.account_alias_known);
+    assert(strcmp((const char *)session.account_alias, "live_tester") == 0);
+    result = AcceptLogin(200, StringLiteral("{\"auth_token\":\"token\",\"account_alias\":\"\"}"), &session);
+    assert(result == AuthResult_AUTH_OK && session.account_alias_known && session.account_alias[0] == 0);
+    result = AcceptLogin(200, StringLiteral("{\"auth_token\":\"token\"}"), &session);
+    assert(result == AuthResult_AUTH_OK && !session.account_alias_known && session.account_alias[0] == 0);
     result = AcceptLogin(401, StringLiteral("{}"), &session);
     assert(result == AuthResult_AUTH_FAILED);
     assert(session.token[0] == 0);

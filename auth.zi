@@ -38,6 +38,10 @@ Registration :: struct {
 
 Session :: struct {
     token: [4096]u8
+    account_alias: [40]u8
+    account_alias_known: bool
+    profile_icon: s64
+    profile_icon_known: bool
     expires_in_seconds: s64
     server_time: s64
     expires_at_local: s64
@@ -176,5 +180,17 @@ AcceptLogin :: (status: s32, response_json: string,
     session.expires_in_seconds = FieldNumber(response_json,
         "expires_in_seconds", 3600)
     session.server_time = FieldNumber(response_json, "server_time", 0)
+    alias_at := FieldAt(response_json, 0, "account_alias")
+    icon_at := FieldAt(response_json, 0, "profile_icon")
+    if icon_at >= 0 {
+        icon := ReadNumber(response_json, icon_at)
+        session.profile_icon_known = icon.valid && icon.value >= 0 && icon.value <= 2147483647 && icon.value == cast(float64)cast(s64)icon.value
+        if session.profile_icon_known { session.profile_icon = cast(s64)icon.value }
+    }
+    if alias_at >= 0 {
+        length := ReadStringText(response_json, alias_at, session.account_alias[:])
+        session.account_alias_known = length >= 0 && length < session.account_alias.count
+        if !session.account_alias_known { session.account_alias = .{} }
+    }
     return cast(AuthResult)AUTH_OK
 }
