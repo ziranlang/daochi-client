@@ -40,8 +40,12 @@ NormalizeFriendTarget :: (target: string, output: []u8) -> bool {
             }
             index += 1
         }
-        if valid && (at + 64 == cast(s64)target.count ||
-            SpaceByte(target[at + 64])) && output.count >= 65 {
+        end := at + 64
+        while valid && end < cast(s64)target.count {
+            if !SpaceByte(target[end]) { valid = false }
+            end += 1
+        }
+        if valid && output.count >= 65 {
             index = 0
             while index < 64 {
                 output[index] = LowerByte(target[at + index])
@@ -74,7 +78,7 @@ NormalizeFriendTarget :: (target: string, output: []u8) -> bool {
         }
         at += 1
     }
-    if length < 4 { output[0] = cast(u8)0; return false }
+    if length < 1 { output[0] = cast(u8)0; return false }
     output[length + 1] = cast(u8)0
     return true
 }

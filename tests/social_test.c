@@ -37,6 +37,16 @@ int main(void)
     assert(NormalizeFriendTarget(StringLiteral("  @Alice_24  "), output));
     assert(strcmp(buffer, "@alice_24") == 0);
     assert(!NormalizeFriendTarget(StringLiteral("alice!"), output));
+    assert(NormalizeFriendTarget(StringLiteral(" @A "), output));
+    assert(strcmp(buffer, "@a") == 0);
+    assert(NormalizeFriendTarget(StringLiteral("AB"), output));
+    assert(strcmp(buffer, "@ab") == 0);
+    assert(BuildFriendRequestBody(StringLiteral("@Wao"), output));
+    assert(strcmp(buffer, "{\"target\":\"@wao\"}") == 0);
+    assert(!NormalizeFriendTarget(StringLiteral(" @ "), output));
+    assert(!NormalizeFriendTarget(StringLiteral("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ignored"), output));
+    assert(NormalizeFriendTarget(StringLiteral(" AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "), output));
+    assert(strcmp(buffer, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") == 0);
     assert(BuildFriendRequestBody(StringLiteral("Alice_24"), output));
     assert(strcmp(buffer, "{\"target\":\"@alice_24\"}") == 0);
     assert(BuildFriendStatsPath(StringLiteral("inbe"),
