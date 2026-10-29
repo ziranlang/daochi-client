@@ -132,10 +132,8 @@ BuildChallengePath :: (account_id: string, output: []u8) -> bool {
     return true
 }
 
-#scope_export
-#program_export
-BuildLoginBody :: (account_id: string, client_id: string,
-    public_key: string, output: []u8) -> bool {
+WriteLoginBody :: (account_id: string, client_id: string,
+    public_key: string, restore: bool, output: []u8) -> bool {
     if output.count == 0 {
         return false
     }
@@ -151,12 +149,31 @@ BuildLoginBody :: (account_id: string, client_id: string,
     writer = AppendJsonQuoted(writer, client_id)
     writer = WriteText(writer, ",\"public_key\":")
     writer = AppendJsonQuoted(writer, public_key)
+    if restore {
+        writer = WriteText(writer, ",\"restore\":true")
+    }
     writer = WriteByte(writer, cast(u8)125)
     if !writer.valid {
         output[0] = cast(u8)0
         return false
     }
     return true
+}
+
+#scope_export
+#program_export
+BuildLoginBody :: (account_id: string, client_id: string,
+    public_key: string, output: []u8) -> bool {
+    return WriteLoginBody(account_id, client_id, public_key, false, output)
+}
+
+// A login that also asks the node to bring back this key's deleted account
+// while the node still holds it, before any new data.
+#scope_export
+#program_export
+BuildRestoreLoginBody :: (account_id: string, client_id: string,
+    public_key: string, output: []u8) -> bool {
+    return WriteLoginBody(account_id, client_id, public_key, true, output)
 }
 
 // The caller hashes the exact body bytes. This function fixes the signed

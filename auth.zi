@@ -22,6 +22,9 @@ Identity :: struct {
     public_key: string
     client_id: string
     signing_context: *void
+    // Asks the node to bring back this key's deleted account on login, as
+    // after importing a key; a node without one just logs in.
+    restore_hold: bool
 }
 
 // Public registration metadata only. A cache never replaces the server's
@@ -135,8 +138,15 @@ PrepareLogin :: (identity: Identity, challenge_json: string,
         !HexText(TextUntilNul(nonce[:]), 64) {
         return cast(AuthResult)AUTH_CHALLENGE_FAILED
     }
-    if !BuildLoginBody(identity.account_id, identity.client_id,
-        identity.public_key, body) {
+    built := false
+    if identity.restore_hold {
+        built = BuildRestoreLoginBody(identity.account_id, identity.client_id,
+            identity.public_key, body)
+    } else {
+        built = BuildLoginBody(identity.account_id, identity.client_id,
+            identity.public_key, body)
+    }
+    if !built {
         return cast(AuthResult)AUTH_PAYLOAD_FAILED
     }
 

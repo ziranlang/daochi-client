@@ -20,6 +20,11 @@ Check :: () -> s32 {
         small[0] != cast(u8)0 {
         return 3
     }
+    restore: [256]u8
+    if !BuildRestoreLoginBody(account, "c1", "pk", restore[:]) ||
+        TextUntilNul(restore[:]) != "{\"user_id_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"client_id\":\"c1\",\"public_key\":\"pk\",\"restore\":true}" {
+        return 5
+    }
     request: DeviceRegistration
     request.account_id = account
     request.app_id = "inbe"
