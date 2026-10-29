@@ -71,6 +71,20 @@ renewing the bearer session clears the hint. Hosts may save this public metadata
 with `WriteRegistration` and restore it with `ReadRegistration`; it contains no
 private key or bearer token.
 
+`record_codec.zi` optionally packs JSON before encryption with a bounded gzip
+frame. Keep the released identity ciphertext and send an independently sealed
+`packed_nonce`/`packed_ciphertext` pair alongside it. Readers request
+`record_encoding:"gzip-v1"` on record pages; older nodes and readers continue to
+use the identity representation. After authenticating the ciphertext, validate
+the frame's claimed length before allocating and call `UnpackRecord` with the
+app's own record limit. Binary media bypass this codec. Native hosts link zlib
+(`-lz`); Emscripten hosts use `-sUSE_ZLIB=1`.
+
+A transport may resend a signed POST when a reused connection drops after the
+node committed it. Sync recognizes the exact signed-transaction replay response
+and retries with a fresh nonce within its existing bounded recovery budget.
+The node's replay protection remains enforced.
+
 Import the package modules with `#import "daochi_client/client"` and
 `#import "daochi_client/sync"`. Set `Client.app_id`, supply a `Device` with a
 persisted Ed25519 key and signer, and supply a cryptographically random 64-digit

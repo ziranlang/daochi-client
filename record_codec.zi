@@ -1,0 +1,62 @@
+// Optional packed JSON record payloads. Hosts seal both the released JSON and
+// this frame with independent nonces. Nodes serve the packed copy only to a
+// reader that requests gzip-v1; older readers retain the released plaintext.
+#import "gzip_linux"
+
+RecordPayloadMaximum :: 8388608
+RecordPackingHeader :: 12
+RecordPackingMagic :: "DAOGZIP1"
+
+RecordIsPacked :: (input: []u8) -> bool {
+    if input.count < RecordPackingHeader { return false }
+    for byte, index: RecordPackingMagic {
+        if input[index] != byte { return false }
+    }
+    return true
+}
+
+// Zero means keep the identity representation; -1 means invalid bounds.
+// The caller owns disjoint input/output buffers and caps output to input size.
+PackRecord :: (input: []u8, output: []u8) -> s64 {
+    if input.count < 1 || input.count > RecordPayloadMaximum || output.count < RecordPackingHeader {
+        return -1
+    }
+    if input.count < 512 { return 0 }
+    // Only structured app records use this frame; binary blobs keep their
+    // existing content-addressed encryption and never enter this codec.
+    if input[0] != 123 && input[0] != 91 { return 0 }
+    count := GzipCompress(input, output[RecordPackingHeader:], 1)
+    if count < 0 || count + RecordPackingHeader + 64 >= input.count {
+        return 0
+    }
+    for byte, index: RecordPackingMagic { output[index] = byte }
+    size := cast(u32)input.count
+    for index: cast(s32)0..3 {
+        output[8 + index] = cast(u8)((size >> cast(u32)(index * 8)) & 255)
+    }
+    return count + RecordPackingHeader
+}
+
+// Validate the authenticated frame's claimed length before any allocation.
+PackedRecordSize :: (input: []u8, maximum: s64 = RecordPayloadMaximum) -> s64 {
+    if !RecordIsPacked(input) || maximum < 1 || maximum > RecordPayloadMaximum {
+        return -1
+    }
+    size: u32
+    for index: cast(s32)0..3 {
+        size |= cast(u32)input[8 + index] << cast(u32)(index * 8)
+    }
+    if size < 1 || cast(s64)size > maximum || input.count >= cast(s64)size {
+        return -1
+    }
+    return cast(s64)size
+}
+
+UnpackRecord :: (input: []u8, output: []u8, maximum: s64 = RecordPayloadMaximum) -> s64 {
+    size := PackedRecordSize(input, maximum)
+    if size < 0 || size > output.count || !GzipDecompress(input[RecordPackingHeader:], output, size) {
+        return -1
+    }
+    if output[0] != 123 && output[0] != 91 { return -1 }
+    return size
+}

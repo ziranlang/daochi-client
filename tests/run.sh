@@ -54,6 +54,13 @@ done
 "$work/release-test"
 echo 'Daochi signed release parsing passed'
 
+"$compiler" --no-main --root "$root" --module-path "$ziran/std" \
+    -o "$work/record-codec" "$root/record_codec.zi"
+"${CC:-cc}" -std=c11 -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections \
+    -I"$ziran/include" -I"$work/record-codec" "$root/tests/record_codec_test.c" \
+    "$work/record-codec"/*.c -lz -o "$work/record-codec-test"
+"$work/record-codec-test"
+
 # The portable SHA-256, HMAC, PBKDF2 and ChaCha20-Poly1305 against known answers.
 "$compiler" --no-main --root "$root" --module-path "$ziran/std" --module-path "crypto=$crypto/src" -o "$work/crypto" "$root/crypto.zi"
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror -I"$ziran/include" -I"$work/crypto" \
