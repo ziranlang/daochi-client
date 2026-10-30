@@ -86,6 +86,28 @@ RecordCursorAfter :: (next: *RecordCursor, previous: *RecordCursor) -> bool {
     return CompareSyncText(TextUntilNul(next.id[:]), TextUntilNul(previous.id[:])) > 0
 }
 
+// A saved cursor behind the request's since_server_version is left from a
+// download that began at an earlier position. The node refuses a cursor
+// before since, so every page request would fail; the download starts again
+// at the request's position instead. True when the cursor was dropped.
+RestartStaleSyncPage :: (body: string, state: *SyncPageState) -> bool {
+    stale: bool
+    {
+        cursor := TextUntilNul(state.cursor[:])
+        since: s64
+        saved: RecordCursor
+        stale = cursor.count > 0 &&
+        SyncVersion(body, FieldAt(body, 0, "since_server_version"), *since) &&
+        ReadRecordCursor(cursor, 0, *saved) && saved.version < since
+    }
+    if !stale {
+        return false
+    }
+    state.pending = false
+    state.cursor[0] = cast(u8)0
+    return true
+}
+
 // Output borrows the caller's request buffer. Legacy snapshot selectors are
 // deliberately excluded: a page never means replacing an entire local account.
 BuildSyncPageRequest :: (body: string, state: *SyncPageState, limit: s32, output: []u8,

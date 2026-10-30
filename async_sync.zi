@@ -67,6 +67,7 @@ PrepareNextSync :: (pending: *PendingSync) -> bool {
             return false
         }
         if pending.page.enabled {
+            unused RestartStaleSyncPage(pending.body, *pending.page)
             capacity := pending.body.count + 16384
             pending.page_body = cast(*u8)SyncAllocate(cast(usize)capacity)
             if pending.page_body == null || !BuildSyncPageRequest(pending.body, *pending.page,

@@ -7,6 +7,7 @@
 #import "net_http"
 #import "text_buffer"
 #import "c_string"
+#import "json_scan"
 #import "sync_flow"
 #import "wire"
 #import "transaction"
@@ -482,10 +483,42 @@ CheckEmptyRecordPages :: () -> bool {
         *state, *next, 64)
 }
 
+// A cursor saved by a download that began before the app's position is one
+// the node refuses: the next page starts again at the app's position.
+CheckStaleRecordCursor :: () -> bool {
+    body := "{\"protocol_version\":6,\"since_server_version\":42341}"
+    stale := SyncPageState.{.enabled = true, .pending = true}
+    if !CopyCString("{\"version\":37105,\"collection\":\"notes\",\"id\":\"note\"}", stale.cursor[:]) ||
+    !RestartStaleSyncPage(body, *stale) || stale.pending || !stale.enabled || stale.cursor[0] != cast(u8)0 {
+        return false
+    }
+    request: [1024]u8
+    if !BuildSyncPageRequest(body, *stale, 64, request[:], true) ||
+    FieldAt(TextUntilNul(request[:]), 0, "record_cursor") >= 0 {
+        return false
+    }
+    // A cursor at or after the position continues its download.
+    current := SyncPageState.{.enabled = true, .pending = true}
+    if !CopyCString("{\"version\":42341,\"collection\":\"notes\",\"id\":\"note\"}", current.cursor[:]) ||
+    RestartStaleSyncPage(body, *current) || !current.pending || current.cursor[0] == cast(u8)0 {
+        return false
+    }
+    if !BuildSyncPageRequest(body, *current, 64, request[:], true) ||
+    FieldAt(TextUntilNul(request[:]), 0, "record_cursor") < 0 {
+        return false
+    }
+    // A first page has no cursor to drop.
+    first := SyncPageState.{.enabled = true}
+    return !RestartStaleSyncPage(body, *first) && !first.pending
+}
+
 #program_export
 main :: () -> s32 {
     if !CheckEmptyRecordPages() {
         return 75
+    }
+    if !CheckStaleRecordCursor() {
+        return 76
     }
     account: [65]u8
     device_key: [65]u8
