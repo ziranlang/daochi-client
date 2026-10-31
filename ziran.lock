@@ -21,18 +21,18 @@
     {
       "commit": "944826f70779a6b6cd53f6b06a75b36f4d8a2558",
       "dependencies": {},
-      "id": "pf039d7a776333200",
+      "id": "pc23fbf455e97614d",
       "name": "crypto",
       "ref": "master",
       "url": "https://github.com/ziranlang/crypto.git"
     }
   ],
   "root": {
-    "dependencies": {"crypto": "pf039d7a776333200", "oqs": "p7098ac9cd92f7e5f"},
+    "dependencies": {"crypto": "pc23fbf455e97614d", "oqs": "p7098ac9cd92f7e5f"},
     "name": "DaochiClient"
   },
   "toolchain": {
-    "commit": "620c4077a801d63984fa4bc6893e857659a5e7e9",
+    "commit": "ee86330414a2febb0135d86506b505af5e6a660b",
     "ref": "master",
     "url": "https://github.com/ziranlang/ziran.git"
   }
